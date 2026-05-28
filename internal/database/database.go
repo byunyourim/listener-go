@@ -7,7 +7,7 @@ package database
 import (
 	"context"
 
-	"github.com/byunyourim/stablecoinbc-adapter-listener/internal/model"
+	"github.com/byunyourim/listener-go/internal/model"
 )
 
 // ChainInfo active 체인 + 토큰 fingerprint

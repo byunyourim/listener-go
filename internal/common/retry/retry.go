@@ -10,7 +10,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/rpc"
 
-	apperrors "github.com/byunyourim/stablecoinbc-adapter-listener/internal/common/errors"
+	apperrors "github.com/byunyourim/listener-go/internal/common/errors"
 )
 
 // Options 재시도 설정

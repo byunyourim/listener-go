@@ -5,7 +5,7 @@ package publisher
 import (
 	"context"
 
-	"github.com/byunyourim/stablecoinbc-adapter-listener/internal/model"
+	"github.com/byunyourim/listener-go/internal/model"
 )
 
 // Publisher Adapter로 입금 전송

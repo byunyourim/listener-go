@@ -5,7 +5,7 @@ package scanner
 import (
 	"context"
 
-	"github.com/byunyourim/stablecoinbc-adapter-listener/internal/model"
+	"github.com/byunyourim/listener-go/internal/model"
 )
 
 // Scanner 한 블록에서 입금 이벤트를 추출하는 전략 (blockScanner / nativeScanner)

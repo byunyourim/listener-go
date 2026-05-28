@@ -1,4 +1,4 @@
-module github.com/byunyourim/stablecoinbc-adapter-listener
+module github.com/byunyourim/listener-go
 
 go 1.25
 
