@@ -153,6 +153,10 @@ migrations/               # Postgres 마이그레이션 (golang-migrate)
 > 핵심 한 줄: **"커서는 이벤트가 durable해진 뒤에만 전진하고, 버퍼는 ACK 전엔 비우지 않는다."**
 > 이 두 규칙이 무너지면 누락이 생기므로, `scanner`/`publisher`/`database` 수정 시 반드시 유지.
 
+### 추가 설계 문서
+
+- [`docs/adapter-cross-check.md`](docs/adapter-cross-check.md) — Adapter cross-check API 도입 계획 (ACK 프로토콜 보완)
+
 ---
 
 ## 시작하기
