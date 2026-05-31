@@ -191,6 +191,7 @@ docs/                     # 향후 도입 설계 문서
 - [`docs/eerc-integration.md`](docs/eerc-integration.md) — eERC20 통합 설계 (PrivateTransfer + Poseidon 복호화)
 - [`docs/eerc-test-vectors-guide.md`](docs/eerc-test-vectors-guide.md) — eERC 복호화 테스트 벡터 확보 가이드 (Phase 2)
 - [`docs/ops-mcp.md`](docs/ops-mcp.md) — 운영 AI MCP 설계 (입금 누락 진단 보조, read-only)
+- [`docs/ops-mcp.md`](docs/ops-mcp.md) — 운영 AI MCP 설계 (입금 누락 진단 보조, read-only)
 
 ---
 
