@@ -161,3 +161,18 @@ var (
 		Help: "Seconds since the last completed audit cycle (0 if just done).",
 	})
 )
+
+// Notify LISTEN/NOTIFY 구독 지표
+var (
+	// NotifyReceived NOTIFY 수신 누적.
+	NotifyReceived = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: "notify", Name: "received_total",
+		Help: "Cumulative LISTEN notifications received.",
+	})
+
+	// NotifyReconnects LISTEN 재연결 횟수 — 안정성 추이 모니터링.
+	NotifyReconnects = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: "notify", Name: "reconnects_total",
+		Help: "Cumulative LISTEN connection reconnects.",
+	})
+)

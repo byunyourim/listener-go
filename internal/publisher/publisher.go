@@ -58,11 +58,13 @@ const (
 type Publisher struct {
 	cfg    Config
 	buffer Buffer
+	wake   <-chan struct{} // LISTEN/NOTIFY로부터 시그널 (nil 가능 — 폴링만 사용)
 	log    *slog.Logger
 }
 
 // New Publisher 생성. 기본값 자동 보정.
-func New(cfg Config, buffer Buffer, log *slog.Logger) *Publisher {
+// wake가 nil이 아니면 알림 수신 시 즉시 flush (폴링 백업과 병행).
+func New(cfg Config, buffer Buffer, wake <-chan struct{}, log *slog.Logger) *Publisher {
 	if cfg.WriteTimeout <= 0 {
 		cfg.WriteTimeout = 10 * time.Second
 	}
@@ -78,7 +80,7 @@ func New(cfg Config, buffer Buffer, log *slog.Logger) *Publisher {
 	if cfg.MaxInFlight <= 0 {
 		cfg.MaxInFlight = 100
 	}
-	return &Publisher{cfg: cfg, buffer: buffer, log: log.With("module", "publisher")}
+	return &Publisher{cfg: cfg, buffer: buffer, wake: wake, log: log.With("module", "publisher")}
 }
 
 // Run 메인 루프. ctx 취소 시 마지막 flush 시도 후 종료.
@@ -156,6 +158,10 @@ func (p *Publisher) drainFireAndForget(ctx context.Context, conn *websocket.Conn
 			return p.gracefulFireAndForget(conn)
 		case err := <-readErr:
 			return fmt.Errorf("read loop ended: %w", err)
+		case <-p.wake:
+			if err := p.flushUntilEmpty(ctx, conn); err != nil {
+				return err
+			}
 		case <-pingTicker.C:
 			if err := writePing(conn, p.cfg.WriteTimeout); err != nil {
 				return err
@@ -203,6 +209,10 @@ func (p *Publisher) drainWithACK(ctx context.Context, conn *websocket.Conn) erro
 			return p.gracefulACK(conn, out, ackCh)
 		case err := <-readErr:
 			return fmt.Errorf("read loop ended: %w", err)
+		case <-p.wake:
+			if err := p.topUp(ctx, conn, out); err != nil {
+				return err
+			}
 		case id := <-ackCh:
 			if err := p.handleAck(ctx, out, id); err != nil {
 				p.log.Warn("ack processing error", "id", id, "err", err)

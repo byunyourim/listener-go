@@ -6,6 +6,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -235,6 +236,34 @@ func TestCursor_DefaultZeroForNewChain(t *testing.T) {
 	cursor, err := repo.Cursor(ctx, 999, "log")
 	require.NoError(t, err)
 	require.EqualValues(t, 0, cursor)
+}
+
+func TestSaveAndAdvance_NotifyOnNonEmpty(t *testing.T) {
+	cleanDB(t)
+	repo := NewBufferRepo(testPool)
+	ctx := context.Background()
+
+	// LISTEN deposits 등록 (별도 conn)
+	conn, err := testPool.Acquire(ctx)
+	require.NoError(t, err)
+	defer conn.Release()
+	_, err = conn.Exec(ctx, "LISTEN deposits")
+	require.NoError(t, err)
+
+	// 빈 deposits → NOTIFY 없어야 함 (짧은 타임아웃)
+	require.NoError(t, repo.SaveAndAdvance(ctx, 1, "log", 100, nil))
+	emptyCtx, emptyCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	_, err = conn.Conn().WaitForNotification(emptyCtx)
+	emptyCancel()
+	require.Error(t, err, "빈 deposits는 NOTIFY 안 보내야 함")
+
+	// 비빈 deposits → NOTIFY 발송
+	require.NoError(t, repo.SaveAndAdvance(ctx, 1, "log", 101, []model.Deposit{makeDeposit(1, "0xaaa", 0)}))
+	notifyCtx, notifyCancel := context.WithTimeout(ctx, 2*time.Second)
+	notif, err := conn.Conn().WaitForNotification(notifyCtx)
+	notifyCancel()
+	require.NoError(t, err)
+	require.Equal(t, "deposits", notif.Channel)
 }
 
 func TestStats_EmptyAndWithData(t *testing.T) {

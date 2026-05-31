@@ -168,7 +168,7 @@ func TestPublisher_FlushExistingPending(t *testing.T) {
 		DrainTimeoutMs:      1000,
 		PollIntervalMs:      50,
 		MaxBatchSize:        100,
-	}, buf, quietLogger())
+	}, buf, nil, quietLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -215,7 +215,7 @@ func TestPublisher_FlushNewlyAdded(t *testing.T) {
 		DrainTimeoutMs:      500,
 		PollIntervalMs:      30,
 		MaxBatchSize:        100,
-	}, buf, quietLogger())
+	}, buf, nil, quietLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -256,7 +256,7 @@ func TestPublisher_ACKMode_FlushAndAck(t *testing.T) {
 		RequireACK:          true,
 		ACKTimeout:          5 * time.Second,
 		MaxInFlight:         10,
-	}, buf, quietLogger())
+	}, buf, nil, quietLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -303,7 +303,7 @@ func TestPublisher_ACKMode_TimeoutReconnect(t *testing.T) {
 		RequireACK:          true,
 		ACKTimeout:          300 * time.Millisecond, // 짧게
 		MaxInFlight:         10,
-	}, buf, quietLogger())
+	}, buf, nil, quietLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -351,7 +351,7 @@ func TestPublisher_ACKMode_FlowControl(t *testing.T) {
 		RequireACK:          true,
 		ACKTimeout:          30 * time.Second, // 충분히 길게
 		MaxInFlight:         maxInFlight,
-	}, buf, quietLogger())
+	}, buf, nil, quietLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -381,7 +381,7 @@ func TestPublisher_ReconnectAfterServerRestart(t *testing.T) {
 		DrainTimeoutMs:      500,
 		PollIntervalMs:      30,
 		MaxBatchSize:        100,
-	}, buf, quietLogger())
+	}, buf, nil, quietLogger())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -404,4 +404,45 @@ func TestPublisher_ReconnectAfterServerRestart(t *testing.T) {
 	require.LessOrEqual(t, srv.dialCount.Load(), int32(3))
 
 	srv.close()
+}
+
+// wake 채널이 신호 보내면 즉시 flush (폴링 없이도 동작)
+func TestPublisher_WakeChannelTriggersFlush(t *testing.T) {
+	srv := newWSTestServer()
+	defer srv.close()
+
+	buf := &fakeBuffer{}
+	wake := make(chan struct{}, 1)
+
+	// 폴링은 매우 길게 — wake가 동작해야만 flush 발생
+	p := publisher.New(publisher.Config{
+		URL:                 srv.url(),
+		ReconnectIntervalMs: 100,
+		DrainTimeoutMs:      500,
+		PollIntervalMs:      10000, // 10초 — 사실상 폴링 비활성
+		MaxBatchSize:        100,
+	}, buf, wake, quietLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = p.Run(ctx); close(done) }()
+
+	// 연결 대기
+	time.Sleep(100 * time.Millisecond)
+
+	// 입금 추가 + wake 신호
+	buf.add(sampleDeposit("0xwake", 0))
+	wake <- struct{}{}
+
+	// 폴링 안 깨워도 즉시 도착해야 함 (1초 이내)
+	select {
+	case msg := <-srv.received:
+		require.Contains(t, msg, "0xwake")
+	case <-time.After(1 * time.Second):
+		t.Fatal("wake 신호 후 1초 이내 메시지 도착 안 함")
+	}
+
+	cancel()
+	<-done
 }

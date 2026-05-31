@@ -24,6 +24,7 @@ import (
 	"github.com/byunyourim/listener-go/internal/database"
 	"github.com/byunyourim/listener-go/internal/httpserver"
 	"github.com/byunyourim/listener-go/internal/metrics"
+	"github.com/byunyourim/listener-go/internal/notify"
 	"github.com/byunyourim/listener-go/internal/publisher"
 	"github.com/byunyourim/listener-go/internal/scanner"
 	"github.com/byunyourim/listener-go/internal/scanner/decoder"
@@ -89,6 +90,11 @@ func run(ctx context.Context, log *slog.Logger) error {
 	decoders.Register(decoder.NewStandardERC20())
 	// decoders.Register(decoder.NewEERC()) // spec 확정 후 활성화
 
+	// LISTEN/NOTIFY — scanner SaveAndAdvance가 NOTIFY를 보내면 publisher가 즉시 깨어남.
+	// wake 채널은 cap 1 (compressed signal). 폴링은 백업으로 유지.
+	wake := make(chan struct{}, 1)
+	listener := notify.New(pool, "deposits", log)
+
 	pub := publisher.New(publisher.Config{
 		URL:                 cfg.WSTarget,
 		ReconnectIntervalMs: cfg.ReconnectIntervalMs,
@@ -98,7 +104,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 		RequireACK:          cfg.PublisherRequireACK,
 		ACKTimeout:          time.Duration(cfg.PublisherACKTimeoutMs) * time.Millisecond,
 		MaxInFlight:         cfg.PublisherMaxInFlight,
-	}, bufferRepo, log)
+	}, bufferRepo, wake, log)
 
 	httpSrv := httpserver.New(httpserver.Config{
 		Addr:            cfg.HTTPAddr,
@@ -122,6 +128,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 	g.Go(func() error { return sup.Run(gctx) })
 	g.Go(func() error { return httpSrv.Run(gctx) })
 	g.Go(func() error { return runBufferMonitor(gctx, bufferRepo, cfg.BufferStatsIntervalS, log) })
+	g.Go(func() error { return listener.Run(gctx, wake) })
 
 	// 감사(audit) 잡 — 누락 검출
 	if cfg.AuditEnabled {

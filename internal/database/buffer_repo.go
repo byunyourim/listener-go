@@ -65,6 +65,14 @@ func (s *BufferRepo) SaveAndAdvance(
 		return fmt.Errorf("upsert scan_cursor: %w", err)
 	}
 
+	// 신규 deposit이 있을 때만 NOTIFY — 빈 블록 cursor 전진까지 publisher를 깨우진 않음.
+	// NOTIFY는 commit 후 발송되므로 트랜잭션 정합성 유지(rollback 시 발송 X).
+	if len(deposits) > 0 {
+		if _, err := tx.Exec(ctx, `NOTIFY deposits`); err != nil {
+			return fmt.Errorf("notify deposits: %w", err)
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit tx: %w", err)
 	}
