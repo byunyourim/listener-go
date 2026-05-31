@@ -1,0 +1,2 @@
+ALTER TABLE chain DROP CONSTRAINT IF EXISTS chain_type_check;
+ALTER TABLE chain DROP COLUMN IF EXISTS chain_type;

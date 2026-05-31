@@ -28,11 +28,14 @@ func TestRegistry_Dispatch(t *testing.T) {
 	require.Nil(t, r.Lookup(common.HexToHash("0xdead")))
 }
 
-func TestRegistry_EERCStubDoesNotPolluteRegistry(t *testing.T) {
+func TestRegistry_RegistersBothERC20AndEERC(t *testing.T) {
 	r := decoder.NewRegistry()
-	r.Register(decoder.NewEERC()) // stub — Topics 비어 있음
+	r.Register(decoder.NewStandardERC20())
+	r.Register(decoder.NewEERC(nil))
 
-	require.Zero(t, r.Len(), "stub eERC는 토픽이 없어 등록되어도 dispatch되지 않음")
+	require.Equal(t, 2, r.Len())
+	require.Contains(t, r.Topics(), decoder.TransferTopic)
+	require.Contains(t, r.Topics(), decoder.PrivateTransferTopic)
 }
 
 func TestStandardERC20_DecodeValid(t *testing.T) {
@@ -99,10 +102,4 @@ func TestStandardERC20_RejectsInvalid(t *testing.T) {
 	}
 }
 
-func TestEERC_StubReturnsNil(t *testing.T) {
-	d := decoder.NewEERC()
-	require.Empty(t, d.Topics(), "stub 단계에선 빈 토픽")
-	ev, err := d.Decode(types.Log{}, database.ContractInfo{}, decoder.Context{})
-	require.NoError(t, err)
-	require.Nil(t, ev)
-}
+// EERC의 자세한 동작은 eerc_test.go 참조 (ABI 파싱 + decryptor 호출 + 거절 케이스)

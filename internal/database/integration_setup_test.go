@@ -120,7 +120,9 @@ func createAdapterTables(ctx context.Context, pool *pgxpool.Pool) error {
 			decimals      INT     NOT NULL,
 			block_time    INT     NOT NULL,
 			confirmations INT     NOT NULL,
-			active        BOOLEAN NOT NULL DEFAULT true
+			active        BOOLEAN NOT NULL DEFAULT true,
+			chain_type    TEXT    NOT NULL DEFAULT 'erc20'
+				CHECK (chain_type IN ('erc20', 'eerc20'))
 		);
 
 		CREATE TABLE token (

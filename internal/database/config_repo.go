@@ -124,14 +124,16 @@ func (s *ConfigRepo) ChainConfig(ctx context.Context, chainID int64) (*ChainConf
 		decimals      int
 		blockTime     int // 초 단위 (TS와 동일 — block_time 컬럼 정의)
 		confirmations int
+		chainType     string
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT rpc_url, native, decimals, block_time, confirmations
+		SELECT rpc_url, native, decimals, block_time, confirmations,
+		       coalesce(chain_type, 'erc20')
 		  FROM chain
 		 WHERE chain_id = $1
 		   AND active = true
 		 LIMIT 1
-	`, chainID).Scan(&rpcURL, &native, &decimals, &blockTime, &confirmations)
+	`, chainID).Scan(&rpcURL, &native, &decimals, &blockTime, &confirmations, &chainType)
 
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
@@ -162,6 +164,7 @@ func (s *ConfigRepo) ChainConfig(ctx context.Context, chainID int64) (*ChainConf
 		BlockTimeMs:       blockTimeMs,
 		PollingIntervalMs: pollingIntervalMs,
 		MinConfirmations:  confirmations,
+		ChainType:         chainType,
 		Contracts:         tokens,
 	}, nil
 }

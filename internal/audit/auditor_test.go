@@ -141,7 +141,7 @@ func newAuditor(t *testing.T, logScan, traceScan audit.Scanner, source *fakeSour
 		IntervalSeconds: 60,
 		WindowBlocks:    100,
 		SafetyMargin:    10,
-		SamplesPerCycle: 200, // 거의 모든 블록 커버
+		SamplesPerCycle: 5000, // 범위 101 블록 대비 압도적 — 모든 블록 사실상 100% 커버
 	}, quietLogger())
 }
 

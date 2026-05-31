@@ -42,6 +42,10 @@ type Config struct {
 	AuditSafetyMargin    int  `env:"AUDIT_SAFETY_MARGIN"      envDefault:"50"`
 	AuditSamplesPerCycle int  `env:"AUDIT_SAMPLES_PER_CYCLE"  envDefault:"5"`
 
+	// eERC20 — Phase 1: stub. 키 설정 시 EnvDecryptor 생성하지만 실 복호화는 미구현(ErrNotImplemented).
+	// production에선 KMS 기반 구현체로 교체할 것.
+	EERCAuditorPrivateKey string `env:"EERC_AUDITOR_PRIVATE_KEY"`
+
 	LogLevel string `env:"LOG_LEVEL" envDefault:"warn"`
 }
 

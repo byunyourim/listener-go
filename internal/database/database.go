@@ -27,5 +27,6 @@ type ChainConfig struct {
 	BlockTimeMs       int
 	PollingIntervalMs int
 	MinConfirmations  int
+	ChainType         string                  // "erc20" 또는 "eerc20" — Decoder 분기용
 	Contracts         map[string]ContractInfo // 컨트랙트 주소(소문자) → 정보
 }

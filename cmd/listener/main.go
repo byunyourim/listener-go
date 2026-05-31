@@ -22,6 +22,7 @@ import (
 	"github.com/byunyourim/listener-go/internal/common/shutdown"
 	"github.com/byunyourim/listener-go/internal/config"
 	"github.com/byunyourim/listener-go/internal/database"
+	"github.com/byunyourim/listener-go/internal/decryption"
 	"github.com/byunyourim/listener-go/internal/httpserver"
 	"github.com/byunyourim/listener-go/internal/metrics"
 	"github.com/byunyourim/listener-go/internal/notify"
@@ -85,10 +86,19 @@ func run(ctx context.Context, log *slog.Logger) error {
 		BaseDelay:  time.Duration(cfg.RPCRetryBaseDelayMs) * time.Millisecond,
 	}
 
-	// 토큰 로그 디코더 — eERC 등 신규 표준 도입 시 여기서 Register
-	decoders := decoder.NewRegistry()
-	decoders.Register(decoder.NewStandardERC20())
-	// decoders.Register(decoder.NewEERC()) // spec 확정 후 활성화
+	// eERC20 복호화 — 키 설정 시 EnvDecryptor, 아니면 NoopDecryptor.
+	// Phase 1: 실 복호화 미구현 (ErrNotImplemented). chain_type='eerc20' 체인 실 운영 전 Phase 2 구현 필수.
+	var decryptor decryption.Decryptor = decryption.NoopDecryptor{}
+	if cfg.EERCAuditorPrivateKey != "" {
+		envDec, err := decryption.NewEnvDecryptor(cfg.EERCAuditorPrivateKey)
+		if err != nil {
+			return fmt.Errorf("eERC decryptor: %w", err)
+		}
+		if envDec != nil {
+			decryptor = envDec
+			log.Info("eERC EnvDecryptor configured (Phase 1: real decryption not implemented yet)")
+		}
+	}
 
 	// LISTEN/NOTIFY — scanner SaveAndAdvance가 NOTIFY를 보내면 publisher가 즉시 깨어남.
 	// wake 채널은 cap 1 (compressed signal). 폴링은 백업으로 유지.
@@ -118,7 +128,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 		onFirst:     httpSrv.MarkReady,
 	}
 
-	builder := newLoopBuilder(cfg, accountRepo, bufferRepo, kcpID, hasKcp, retryOpts, decoders, log)
+	builder := newLoopBuilder(cfg, accountRepo, bufferRepo, kcpID, hasKcp, retryOpts, decryptor, log)
 	sup := supervisor.New(supSource, builder,
 		supervisor.Config{PollIntervalMs: cfg.ManagerPollIntervalMs}, log)
 
@@ -132,7 +142,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 
 	// 감사(audit) 잡 — 누락 검출
 	if cfg.AuditEnabled {
-		auditBuilder := newAuditBuilder(accountRepo, kcpID, hasKcp, retryOpts, decoders, log)
+		auditBuilder := newAuditBuilder(accountRepo, kcpID, hasKcp, retryOpts, decryptor, log)
 		auditor := audit.New(configRepo, bufferRepo, auditBuilder, audit.Config{
 			IntervalSeconds: cfg.AuditIntervalS,
 			WindowBlocks:    uint64(cfg.AuditWindowBlocks),
@@ -194,6 +204,23 @@ func (r readyMarkingSource) ActiveChains(ctx context.Context) ([]database.ChainI
 	return out, err
 }
 
+// decodersForChain chain_type 기반으로 적절한 decoder Registry 생성.
+//   - "eerc20" → EERC decoder (PrivateTransfer)
+//   - 그 외 (기본 "erc20") → StandardERC20 decoder (Transfer)
+//
+// eERC 체인은 ERC-20 디코더가 등록되지 않음 → 일반 Transfer 이벤트는 무시(의도된 동작).
+// 네이티브 감지는 decoder Registry와 무관하게 LogScanner.parseNativeTransfers가 처리.
+func decodersForChain(chainType string, decryptor decryption.Decryptor) *decoder.Registry {
+	r := decoder.NewRegistry()
+	switch chainType {
+	case "eerc20":
+		r.Register(decoder.NewEERC(decryptor))
+	default:
+		r.Register(decoder.NewStandardERC20())
+	}
+	return r
+}
+
 // newAuditBuilder 감사 잡이 호출할 빌더 — 정상 scanner와 RPC 클라이언트 공유 X.
 // 각 audit 사이클마다 fresh 연결을 만들어 cleanup으로 닫는다.
 func newAuditBuilder(
@@ -201,7 +228,7 @@ func newAuditBuilder(
 	kcpChainID int64,
 	hasKcp bool,
 	retryOpts retry.Options,
-	decoders *decoder.Registry,
+	decryptor decryption.Decryptor,
 	log *slog.Logger,
 ) audit.ScannerBuilder {
 	return func(ctx context.Context, chain *database.ChainConfig) (audit.Scanner, audit.Scanner, func(), error) {
@@ -211,6 +238,7 @@ func newAuditBuilder(
 		}
 		ethClient := ethclient.NewClient(rpcClient)
 
+		decoders := decodersForChain(chain.ChainType, decryptor)
 		logScan := scanner.NewLogScanner(ethClient, accountRepo, chain, kcpChainID, hasKcp, retryOpts, decoders)
 		traceScan := scanner.NewTraceScanner(ethClient, rpcClient, accountRepo, chain, retryOpts, log)
 
@@ -227,7 +255,7 @@ func newLoopBuilder(
 	kcpChainID int64,
 	hasKcp bool,
 	retryOpts retry.Options,
-	decoders *decoder.Registry,
+	decryptor decryption.Decryptor,
 	log *slog.Logger,
 ) supervisor.LoopBuilder {
 	loopCfgFor := func(chain *database.ChainConfig) scanner.LoopConfig {
@@ -247,6 +275,7 @@ func newLoopBuilder(
 		}
 		ethClient := ethclient.NewClient(rpcClient)
 
+		decoders := decodersForChain(chain.ChainType, decryptor)
 		logScan := scanner.NewLogScanner(ethClient, accountRepo, chain, kcpChainID, hasKcp, retryOpts, decoders)
 		traceScan := scanner.NewTraceScanner(ethClient, rpcClient, accountRepo, chain, retryOpts, log)
 
