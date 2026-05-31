@@ -126,6 +126,13 @@ go test ./...     # 테스트 통과 (-race 권장)
 - 외부 의존(ethclient/pgx/ws)만 mock하고 **비즈니스 로직은 실제 호출**한다.
 - 입금 누락 방지 불변식(커서 전진 / at-least-once / 멱등성)은 반드시 테스트로 고정한다.
 
+**통합 테스트 (DB)**
+- 빌드 태그 `//go:build integration` — 기본 `go test`엔 안 들어감
+- 실행: `make test-integration` 또는 `go test -tags=integration ./...`
+- Docker daemon 필요 — testcontainers-go가 임시 Postgres 컨테이너 기동
+- 검증 대상: SaveAndAdvance 트랜잭션 원자성, UNIQUE 제약, HasMany 일괄 매칭, chain_id scope 보안 등 SQL 레벨 불변식
+- Docker 없으면 TestMain이 skip — `go test`가 깨지지 않음
+
 ### 의존성
 
 - **import하는 시점에 `go get`** 한다. 안 쓰는 패키지를 미리 받지 않는다(`go mod tidy`가 제거).
