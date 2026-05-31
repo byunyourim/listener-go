@@ -100,7 +100,7 @@
 
 체인별 goroutine이 같은 Store 인스턴스를 공유하므로 아래를 반드시 지킨다:
 
-- **Store는 무상태(stateless).** `database`의 `ConfigStore`/`AccountStore`/`BufferStore`는 `*pgxpool.Pool`만 들고, 가변 필드(커서 캐시·카운터·단일 Conn·특정 conn에 묶인 prepared statement)를 두지 않는다. 풀 외 공유 상태가 없어야 동시 호출이 안전하다.
+- **Repo는 무상태(stateless).** `database`의 `ConfigRepo`/`AccountRepo`/`BufferRepo`는 `*pgxpool.Pool`만 들고, 가변 필드(커서 캐시·카운터·단일 Conn·특정 conn에 묶인 prepared statement)를 두지 않는다. 풀 외 공유 상태가 없어야 동시 호출이 안전하다.
 - **풀만 공유, Conn/Tx는 작업마다 새로.** `*pgxpool.Pool`은 동시성 안전하지만 단일 `*pgx.Conn`·`pgx.Tx`는 아니다 — goroutine 간 공유 금지.
 - **커서는 `(chain_id, scanner)` 단위로 한 goroutine만 소유.** supervisor는 같은 `(chain, scanner)`에 goroutine을 둘 이상 띄우지 않는다(커서 경합·lost update 방지).
 - **supervisor의 실행 중 체인 맵은 `sync.Mutex`(또는 채널)로 보호.** reconcile 루프와 goroutine이 동시에 접근한다.

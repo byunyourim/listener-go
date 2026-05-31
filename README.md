@@ -161,8 +161,9 @@ brew install golang-migrate sqlc golangci-lint
 # 의존성 동기화 (go-ethereum은 이미 go.mod에 등록됨)
 go mod tidy
 
-# 빌드 — 현재 골격 상태에서도 컴파일 통과
+# 빌드 + 테스트
 go build ./...
+go test -race ./...
 
 # DB 준비 + 마이그레이션
 cp .env.example .env          # 값 채우기
@@ -174,20 +175,19 @@ make run
 make test
 ```
 
-### 의존성 추가 현황
+### 의존성 현황
 
-| 패키지 | 상태 | 비고 |
-|--------|------|------|
-| `github.com/ethereum/go-ethereum` | ✅ 등록됨 | `internal/common/retry` 등에서 사용 중 |
-| `github.com/jackc/pgx/v5` | ⏳ 미등록 | `database` 구현 시 `go get` |
-| `github.com/gorilla/websocket` | ⏳ 미등록 | `publisher` 구현 시 `go get` (현재는 go-ethereum의 간접 의존) |
-| `github.com/caarlos0/env/v11` | ⏳ 미등록 | `config.Load` 구현 시 `go get` |
+| 패키지 | 용도 |
+|--------|------|
+| `github.com/ethereum/go-ethereum` | RPC 클라이언트 (ethclient, rpc), 로그 디코드 (common, crypto) |
+| `github.com/jackc/pgx/v5` | Postgres 드라이버 + pgxpool |
+| `github.com/gorilla/websocket` | Adapter WebSocket 클라이언트 |
+| `github.com/caarlos0/env/v11` | 환경변수 → struct 매핑 |
+| `golang.org/x/sync/errgroup` | publisher + supervisor 병렬 실행 |
+| `github.com/stretchr/testify` | 테스트 어설션 (test-only) |
 
-> 미등록 패키지를 `go get` 전에 import하면 빌드가 깨지고, 코드에서 쓰지 않는 채로 `go get`만 하면
-> `go mod tidy`가 제거한다. **해당 패키지를 실제로 import하는 시점에 함께 추가**한다.
-
-> 현재 상태: **골격(skeleton)**. 패키지 인터페이스/도메인 타입/마이그레이션 스키마만 정의돼 있고
-> 구현부는 `panic("not implemented")` 또는 `TODO(골격)`으로 표시돼 있다.
+> 현재 상태: **TS 1:1 포팅 완료**. 모든 모듈에 구현이 들어가 있고 `-race` 테스트 통과.
+> 통합 테스트(실 Postgres + 실 RPC + 실 Adapter)는 별도 인프라(testcontainers 등) 필요.
 
 ---
 

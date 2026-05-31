@@ -20,10 +20,22 @@ type Options struct {
 }
 
 // Do fn을 지수 백오프로 재시도, 재시도 불가 에러(IsRetryable=false)면 즉시 반환
-//
-// TODO(골격): 구현, ctx 취소 존중
 func Do(ctx context.Context, opt Options, fn func() error) error {
-	panic("not implemented")
+	var err error
+	for attempt := 0; attempt <= opt.MaxRetries; attempt++ {
+		if err = fn(); err == nil {
+			return nil
+		}
+		if !IsRetryable(err) || attempt == opt.MaxRetries {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(opt.BaseDelay << attempt):
+		}
+	}
+	return err
 }
 
 // IsRetryable RPC/네트워크 에러가 재시도 대상인지 판단
@@ -44,21 +56,24 @@ func IsRetryable(err error) bool {
 
 	var rpcErr rpc.Error
 	if errors.As(err, &rpcErr) {
-		switch rpcErr.ErrorCode() {
-		case -32603: // internal error
+		switch code := rpcErr.ErrorCode(); code {
+		case rpcCodeInternalError:
 			return true
-		case -32001, -32003: // 미지원 / response too large — 재시도해도 동일 실패
+		case rpcCodeNotificationsUnsup, rpcCodeResponseTooLarge:
 			return false
 		default:
-			code := rpcErr.ErrorCode()
-			return code <= -32000 && code >= -32099 // 서버 에러 범위(timeout·rate limit)만 재시도
+			return code <= rpcCodeServerErrorMax && code >= rpcCodeServerErrorMin
 		}
 	}
 
 	var httpErr rpc.HTTPError
 	if errors.As(err, &httpErr) {
 		switch httpErr.StatusCode {
-		case 429, 500, 502, 503, 504:
+		case httpStatusTooManyRequests,
+			httpStatusInternalServerError,
+			httpStatusBadGateway,
+			httpStatusServiceUnavailable,
+			httpStatusGatewayTimeout:
 			return true
 		default:
 			return false

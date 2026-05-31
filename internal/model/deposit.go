@@ -1,7 +1,12 @@
 // Package model 순수 도메인 타입 + 변환 (외부 라이브러리 import 금지)
 package model
 
-import "math/big"
+import (
+	"fmt"
+	"math/big"
+	"strings"
+	"time"
+)
 
 // DepositStatus Adapter로 전송되는 입금 확정 상태
 type DepositStatus string
@@ -12,7 +17,6 @@ const (
 )
 
 // DepositEvent 스캐너가 블록에서 추출한 원시 파싱 결과
-// amount는 wei 단위, 주소는 EIP-55 checksum 원본 유지
 type DepositEvent struct {
 	ChainID             int64
 	TxHash              string
@@ -33,16 +37,70 @@ type Deposit struct {
 	LogIndex            int
 	FromAddress         string
 	ToAddress           string
-	Amount              string // 포맷된 소수 문자열 (예: "1.0")
+	Amount              string // 포맷된 소수 (decimals 만큼 자릿수 고정)
+	ConfirmCount        int
 	Symbol              string
 	Status              DepositStatus
-	TransactionDatetime string // KST yyyyMMddHHmmssSSS
-	ReceivedDatetimeMs  string // 서버 수신 시각 KST
+	TransactionDatetime string // KST yyyyMMddHHmmss
+	ReceivedDatetimeMs  string // KST yyyyMMddHHmmssSSS
 }
 
-// ToDeposit DepositEvent → Deposit 변환, 불가 시 (nil, false). 변환은 이 함수만
-//
-// TODO(골격): wei→소수 포맷, KST 변환, status 결정
+var kstLocation = time.FixedZone("KST", 9*60*60)
+
+// ToDeposit DepositEvent → Deposit 변환, 변환 불가 시 (nil, false)
 func ToDeposit(e DepositEvent, minConfirmations int) (*Deposit, bool) {
-	panic("not implemented")
+	tx, err := time.Parse(time.RFC3339Nano, e.TransactionDatetime)
+	if err != nil {
+		return nil, false
+	}
+
+	status := StatusPending
+	if e.Confirmations >= minConfirmations {
+		status = StatusConfirmed
+	}
+
+	return &Deposit{
+		ChainID:             e.ChainID,
+		TxHash:              e.TxHash,
+		LogIndex:            e.LogIndex,
+		FromAddress:         e.FromAddress,
+		ToAddress:           e.ToAddress,
+		Amount:              formatUnits(e.Amount, e.Decimals),
+		ConfirmCount:        e.Confirmations,
+		Symbol:              e.Symbol,
+		Status:              status,
+		TransactionDatetime: formatKst(tx, false),
+		ReceivedDatetimeMs:  formatKst(time.Now(), true),
+	}, true
+}
+
+// formatUnits wei 정수를 decimals 자릿수 고정 소수 문자열로 변환 (ethers.formatUnits + padDecimals 대응)
+func formatUnits(wei *big.Int, decimals int) string {
+	if wei == nil {
+		wei = new(big.Int)
+	}
+	s := wei.String()
+	sign := ""
+	if strings.HasPrefix(s, "-") {
+		sign = "-"
+		s = s[1:]
+	}
+	if decimals == 0 {
+		return sign + s
+	}
+	if len(s) <= decimals {
+		s = strings.Repeat("0", decimals-len(s)+1) + s
+	}
+	pos := len(s) - decimals
+	return sign + s[:pos] + "." + s[pos:]
+}
+
+// formatKst 시각을 KST yyyyMMddHHmmss(SSS) 문자열로 포맷
+func formatKst(t time.Time, includeMs bool) string {
+	kt := t.In(kstLocation)
+	base := kt.Format("20060102150405")
+	if !includeMs {
+		return base
+	}
+	return base + fmt.Sprintf("%03d", kt.Nanosecond()/int(time.Millisecond))
 }
