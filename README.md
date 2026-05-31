@@ -15,17 +15,25 @@ Go 표준 레이아웃(`cmd` + `internal`)을 따른다.
 
 ```
 cmd/
-  listener/main.go        # 단일 진입점 (TS의 manager+worker+native-worker 통합)
+  listener/main.go        # 단일 진입점 — DI wiring + errgroup 병렬 실행
 internal/
   config/                 # 환경변수 파싱 (process.env 경계)
   common/
-    logger/ retry/ errors/ shutdown/
+    logger/  retry/  errors/  shutdown/
   model/                  # 순수 도메인 타입 + 변환 (외부 의존 금지)
-  database/               # Postgres 접근 (config/account read-only, buffer 읽기/쓰기)
+  database/               # Postgres 접근. ConfigRepo / AccountRepo / BufferRepo
   scanner/                # RPC 폴링 → 입금 이벤트 추출
-  publisher/              # Adapter WebSocket 전송 + 버퍼 flush
-  supervisor/             # 체인별 스캐너 goroutine 생명주기 (TS manager 대응)
+    decoder/              # 토큰 로그 디코더 (StandardERC20, EERC, ...) + Registry
+  publisher/              # Adapter WebSocket 전송 + ACK 프로토콜 + buffer drain
+  supervisor/             # 체인별 (log, trace) goroutine 생명주기 + 토큰 변경 감지
+  audit/                  # 누락 검출 — cursor 근방 재스캔 cross-check
+  notify/                 # Postgres LISTEN/NOTIFY 구독 (publisher wake)
+  decryption/             # eERC20 auditorPCT 복호화 (Phase 1: stub, Phase 2: 실 구현)
+  metrics/                # prometheus 메트릭 등록
+  httpserver/             # /metrics, /healthz, /readyz, /debug/pprof
 migrations/               # Postgres 마이그레이션 (golang-migrate)
+docs/                     # 향후 도입 설계 문서
+testdata/                 # eERC 테스트 벡터 등 (Phase 2 진행 시)
 ```
 
 `internal/`을 쓰는 이유: Go는 `internal` 패키지를 같은 모듈 외부에서 import 못 하게 컴파일러가 강제한다. 외부에 노출할 라이브러리가 아니므로 캡슐화에 적합.
@@ -103,12 +111,15 @@ migrations/               # Postgres 마이그레이션 (golang-migrate)
 
 **선택 이유**: TS 버전이 PM2 멀티프로세스였던 건 Node 싱글 스레드 제약 때문이다. Go는 goroutine으로 한 프로세스 안에서 진짜 병렬 처리가 되므로 그 제약이 사라진다. `supervisor`가 체인별 스캐너 goroutine을 **panic recover로 격리**하고, 장애 시 Postgres의 `scan_cursor`에서 이어받으므로 한 체인 장애가 입금 누락이나 다른 체인에 영향을 주지 않는다. 운영도 바이너리 하나로 단순해진다.
 
-### 관측성 (운영 권장)
+### 관측성 (도입 완료)
 
 | 영역 | 선택 | 비고 |
 |------|------|------|
-| 메트릭 | prometheus/client_golang | 마지막 처리 블록, 버퍼 적체 수, 전송 실패율 노출 → 누락 조기 감지 |
-| 테스트 | 표준 `testing` + stretchr/testify | 외부 의존(ethclient/pgx/ws)만 mock, 비즈니스 로직은 실제 호출 |
+| 메트릭 | **prometheus/client_golang** | 24개+ 메트릭 노출 (scanner cursor/lag, buffer pending/age, publisher sent/errors/in_flight, supervisor panics/reconciles, audit mismatch, notify received, eERC decrypt 등) |
+| 헬스체크 | net/http + 자체 핸들러 | `/healthz`(liveness), `/readyz`(첫 reconcile + DB ping) |
+| pprof | net/http/pprof | `/debug/pprof/` — 운영 중 라이브 프로파일링 |
+| 통합 테스트 | **testcontainers-go** | 임시 Postgres 컨테이너로 SQL 레벨 불변식 검증 (`make test-integration`) |
+| 단위 테스트 | 표준 `testing` + `stretchr/testify` | 외부 의존(ethclient/pgx/ws)만 mock, 비즈니스 로직은 실제 호출 |
 
 ---
 
@@ -149,6 +160,26 @@ migrations/               # Postgres 마이그레이션 (golang-migrate)
 
 6. **graceful shutdown**
    SIGTERM 수신 시 진행 중 블록 처리를 마치고 버퍼를 flush, 커서를 commit한 뒤 종료한다(`cmd/listener/main.go`).
+   ACK 모드일 땐 outstanding 메시지의 ACK를 `DRAIN_TIMEOUT_MS` 내에 대기 후 종료.
+
+7. **감사(audit) 잡 — 누락 검출**
+   별도 goroutine이 1시간 주기로 cursor 근방 N블록을 별도 RPC로 **재스캔**하고
+   `deposit_buffer`의 pending과 1:1 비교한다.
+   - pending에 있는데 재스캔에 없으면 → `audit_mismatch_pending_missing_total` 카운트 + 에러 로그 → **즉시 알람**
+   - scanner 비결정성 / RPC 응답 drift / reorg 데이터 변동을 검출
+   - 정상 scanner와 RPC 클라이언트 공유 X (격리)
+
+8. **LISTEN/NOTIFY — 폴링 지연 0**
+   `SaveAndAdvance` commit 후 `NOTIFY deposits` 발송 → publisher의 LISTEN 워커가 즉시 wake → flush.
+   평균 전송 지연 ~250ms → **~1ms**. 폴링은 백업으로 유지(누락 0 보장).
+
+9. **운영 알람 (메트릭 + 로그)**
+   누락 위험 신호는 모두 prometheus 메트릭으로 노출 + 크리티컬은 `level=error` 로그.
+   - `listener_buffer_pending_total`, `listener_buffer_oldest_age_seconds` (publisher 정체)
+   - `listener_scanner_lag_blocks` (체인별 처리 지연)
+   - `listener_supervisor_panics_total` (반드시 0)
+   - `listener_publisher_ack_timeouts_total` (Adapter 응답 불량)
+   - `listener_audit_mismatch_pending_missing_total` (잠재 누락)
 
 > 핵심 한 줄: **"커서는 이벤트가 durable해진 뒤에만 전진하고, 버퍼는 ACK 전엔 비우지 않는다."**
 > 이 두 규칙이 무너지면 누락이 생기므로, `scanner`/`publisher`/`database` 수정 시 반드시 유지.
@@ -178,53 +209,124 @@ brew install golang-migrate sqlc golangci-lint
 ### 빌드 / 실행
 
 ```bash
-# 의존성 동기화 (go-ethereum은 이미 go.mod에 등록됨)
+# 의존성 동기화
 go mod tidy
 
-# 빌드 + 테스트
+# 빌드 + 단위 테스트 (race detector)
 go build ./...
-go test -race ./...
+make test-race
+
+# Docker 있으면 통합 테스트도 (testcontainers로 임시 Postgres 컨테이너 기동)
+make test-integration
 
 # DB 준비 + 마이그레이션
 cp .env.example .env          # 값 채우기
 export DATABASE_URL="postgres://..."
 make migrate-up
 
-# 실행 / 테스트
+# 실행
 make run
-make test
 ```
+
+### 운영 endpoint (HTTP)
+
+`HTTP_ADDR` (기본 `:8080`)에서 노출:
+
+| 경로 | 용도 |
+|------|------|
+| `GET /metrics` | prometheus 텍스트 포맷 메트릭 |
+| `GET /healthz` | liveness — 프로세스 alive면 200 |
+| `GET /readyz` | readiness — 첫 reconcile 완료 + DB ping 통과 시 200 |
+| `GET /debug/pprof/` | 라이브 프로파일링 (heap, goroutine, cpu 등) |
 
 ### 의존성 현황
 
 | 패키지 | 용도 |
 |--------|------|
-| `github.com/ethereum/go-ethereum` | RPC 클라이언트 (ethclient, rpc), 로그 디코드 (common, crypto) |
+| `github.com/ethereum/go-ethereum` | RPC 클라이언트 (ethclient, rpc), 로그 디코드 |
 | `github.com/jackc/pgx/v5` | Postgres 드라이버 + pgxpool |
 | `github.com/gorilla/websocket` | Adapter WebSocket 클라이언트 |
 | `github.com/caarlos0/env/v11` | 환경변수 → struct 매핑 |
-| `golang.org/x/sync/errgroup` | publisher + supervisor 병렬 실행 |
+| `github.com/prometheus/client_golang` | 메트릭 수집·노출 |
+| `golang.org/x/sync/errgroup` | publisher / supervisor / audit / notify / httpserver 병렬 실행 |
 | `github.com/stretchr/testify` | 테스트 어설션 (test-only) |
+| `github.com/testcontainers/testcontainers-go` | 통합 테스트 임시 Postgres 컨테이너 (test-only) |
 
-> 현재 상태: **TS 1:1 포팅 완료**. 모든 모듈에 구현이 들어가 있고 `-race` 테스트 통과.
-> 통합 테스트(실 Postgres + 실 RPC + 실 Adapter)는 별도 인프라(testcontainers 등) 필요.
+> 향후 (eERC Phase 2 진행 시):
+> `github.com/iden3/go-iden3-crypto` — Baby JubJub + Poseidon 해시
+
+### 현재 상태
+
+- ✅ **TS 1:1 포팅 완료** — 모든 모듈 구현, 12개 패키지 `-race` 통과
+- ✅ **Phase 1 운영 강화** — 메트릭, 헬스/pprof, AccountRepo prefetch, WS dead-write 차단, publisher catch-up 루프
+- ✅ **Adapter ACK 프로토콜** — `PUBLISHER_REQUIRE_ACK=true`로 활성화 가능 (Adapter 측 협의 후)
+- ✅ **감사(audit) 잡** — 1시간 주기 cross-check, 자동 알람
+- ✅ **LISTEN/NOTIFY** — 폴링 지연 0
+- ✅ **DB 통합 테스트** — testcontainers 기반, SQL 레벨 불변식 검증
+- ✅ **eERC Phase 1** — Decoder ABI 파싱 + chain_type 분기 + decryption 인터페이스
+- ⏳ **eERC Phase 2** — 실 복호화 구현 (테스트 벡터 확보 후 별도 PR — [`docs/eerc-test-vectors-guide.md`](docs/eerc-test-vectors-guide.md) 참고)
+- ⏳ **Adapter cross-check / RPC quorum** — 설계 완료, 비즈니스 결정 대기 (`docs/` 참조)
 
 ---
 
 ## 환경변수
 
-| 변수 | 필수 | 기본값 | 용도 |
-|------|------|--------|------|
-| `DATABASE_URL` | ✅ | — | Postgres DSN |
-| `WS_TARGET` | ✅ | — | Adapter WebSocket URL |
-| `RPC_MAX_RETRIES` | | 5 | RPC 최대 재시도 |
-| `RPC_RETRY_BASE_DELAY_MS` | | 1000 | 재시도 기본 대기 |
-| `MAX_BLOCKS_PER_POLL` | | 50 | 폴링 1회당 최대 블록 수 |
-| `BLOCK_DELAY_MS` | | 100 | 블록 간 대기 |
-| `RECONNECT_INTERVAL_MS` | | 3000 | WS 재연결 대기 |
-| `DRAIN_TIMEOUT_MS` | | 5000 | drain 타임아웃 |
-| `MANAGER_POLL_INTERVAL_MS` | | 300000 | supervisor reconcile 주기 |
-| `LOG_LEVEL` | | info | 로그 레벨 |
+### 필수
+
+| 변수 | 용도 |
+|------|------|
+| `DATABASE_URL` | Postgres DSN. 다중 conn 사용 시 `?pool_max_conns=N` 권장 (LISTEN이 1 영구 점유) |
+| `WS_TARGET` | Adapter WebSocket URL |
+
+### 스캐너 / RPC
+
+| 변수 | 기본값 | 용도 |
+|------|--------|------|
+| `RPC_MAX_RETRIES` | 5 | RPC 최대 재시도 |
+| `RPC_RETRY_BASE_DELAY_MS` | 1000 | 재시도 기본 대기 |
+| `MAX_BLOCKS_PER_POLL` | 50 | 폴링 1회당 최대 블록 수 |
+| `BLOCK_DELAY_MS` | 100 | 블록 간 대기 |
+| `MANAGER_POLL_INTERVAL_MS` | 300000 | supervisor reconcile 주기 (5분) |
+
+### Publisher / WebSocket
+
+| 변수 | 기본값 | 용도 |
+|------|--------|------|
+| `RECONNECT_INTERVAL_MS` | 3000 | WS 재연결 기본 간격 (지수 백오프 + jitter) |
+| `DRAIN_TIMEOUT_MS` | 5000 | graceful shutdown 시 마지막 drain 타임아웃 |
+| `PUBLISHER_REQUIRE_ACK` | false | Adapter ACK 프로토콜 활성화. Adapter 측 구현 후 true |
+| `PUBLISHER_ACK_TIMEOUT_MS` | 30000 | ACK 미수신 시 연결 drop + 재연결 |
+| `PUBLISHER_MAX_IN_FLIGHT` | 100 | 미Ack 메시지 상한 (flow control) |
+
+### 감사(audit) 잡
+
+| 변수 | 기본값 | 용도 |
+|------|--------|------|
+| `AUDIT_ENABLED` | true | 0이면 audit 잡 비활성 |
+| `AUDIT_INTERVAL_S` | 3600 | 사이클 주기 (초) |
+| `AUDIT_WINDOW_BLOCKS` | 1000 | cursor 뒤로 검사할 블록 범위 |
+| `AUDIT_SAFETY_MARGIN` | 50 | cursor 바로 앞 N 블록은 audit 제외 (처리 중일 수 있음) |
+| `AUDIT_SAMPLES_PER_CYCLE` | 5 | 사이클당 재스캔할 랜덤 블록 수 |
+
+### 관측성 (HTTP / 모니터링)
+
+| 변수 | 기본값 | 용도 |
+|------|--------|------|
+| `HTTP_ADDR` | :8080 | /metrics, /healthz, /readyz, /debug/pprof 노출 포트 |
+| `BUFFER_STATS_INTERVAL_S` | 15 | buffer pending count / oldest age 갱신 주기 |
+| `LOG_LEVEL` | warn | 로그 레벨 (debug/info/warn/error) |
+| `LOG_PRETTY` | — | true 면 text 핸들러 (로컬 개발), 그 외 JSON |
+
+### eERC20 (Phase 1, 옵션)
+
+| 변수 | 기본값 | 용도 |
+|------|--------|------|
+| `EERC_AUDITOR_PRIVATE_KEY` | — | hex 인코딩 auditor 키. 미설정 시 NoopDecryptor 사용. Phase 2 전까지 실 복호화는 ErrNotImplemented |
+
+> production에선 KMS/Vault 기반 구현체로 교체 권장 ([`docs/eerc-integration.md`](docs/eerc-integration.md) §9.2 키 보안 정책).
 
 > `CHAIN_ID`는 TS 버전에서 워커별 주입값이었으나, 단일 바이너리 + supervisor 구조에서는
 > config DB의 active 체인 목록으로 대체되어 더 이상 필요 없다.
+
+> `chain.chain_type` 컬럼 (`'erc20'` 또는 `'eerc20'`)으로 체인별 decoder가 분기된다.
+> chain 테이블은 Adapter 소유 — 컬럼 추가는 협의 필요 ([`migrations/0003_add_chain_type.up.sql`](migrations/0003_add_chain_type.up.sql)).
