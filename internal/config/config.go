@@ -28,6 +28,12 @@ type Config struct {
 	HTTPAddr             string `env:"HTTP_ADDR"               envDefault:":8080"`
 	BufferStatsIntervalS int    `env:"BUFFER_STATS_INTERVAL_S" envDefault:"15"`
 
+	// Adapter ACK 프로토콜 — Adapter가 application-level ACK 지원 시 true (진짜 at-least-once).
+	// false면 WriteMessage 성공 시 즉시 DB.Ack (현재 동작, 누락 위험 잔존).
+	PublisherRequireACK   bool `env:"PUBLISHER_REQUIRE_ACK"    envDefault:"false"`
+	PublisherACKTimeoutMs int  `env:"PUBLISHER_ACK_TIMEOUT_MS" envDefault:"30000"`
+	PublisherMaxInFlight  int  `env:"PUBLISHER_MAX_IN_FLIGHT"  envDefault:"100"`
+
 	LogLevel string `env:"LOG_LEVEL" envDefault:"warn"`
 }
 

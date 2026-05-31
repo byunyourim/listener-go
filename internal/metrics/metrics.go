@@ -88,6 +88,24 @@ var (
 		Namespace: namespace, Subsystem: "publisher", Name: "reconnects_total",
 		Help: "Cumulative reconnect attempts.",
 	})
+
+	// PublisherAcksReceived Adapter ACK 수신 누적 (RequireACK 모드).
+	PublisherAcksReceived = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: "publisher", Name: "acks_received_total",
+		Help: "Cumulative ACK messages received from Adapter.",
+	})
+
+	// PublisherAckTimeouts ACK 타임아웃으로 재연결한 횟수 (0이 정상).
+	PublisherAckTimeouts = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: "publisher", Name: "ack_timeouts_total",
+		Help: "Cumulative connection drops due to ACK timeout.",
+	})
+
+	// PublisherInFlight 현재 미Ack 메시지 수.
+	PublisherInFlight = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace, Subsystem: "publisher", Name: "in_flight",
+		Help: "Number of messages awaiting ACK.",
+	})
 )
 
 // Supervisor 라이프사이클 지표

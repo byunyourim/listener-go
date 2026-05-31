@@ -125,8 +125,21 @@ migrations/               # Postgres 마이그레이션 (golang-migrate)
    ```
    이벤트가 DB에 durable하게 들어간 **뒤에만** 커서가 전진한다. 어느 시점에 크래시가 나도, 커밋 전이면 그 블록은 다음 기동 때 다시 스캔되고(중복은 3번이 처리), 커밋 후면 버퍼에 안전하게 남아 있다. → **블록 유실 0.**
 
-3. **at-least-once 전송 + 버퍼**
-   `deposit_buffer`의 행은 **Adapter가 ACK할 때까지 삭제하지 않는다.** WS가 끊기거나 프로세스가 죽어도 미전송분은 DB에 남아 재연결 시 flush된다. 전송은 "최소 한 번"을 보장한다.
+3. **at-least-once 전송 + 버퍼 + Adapter ACK 프로토콜**
+   `deposit_buffer`의 행은 **Adapter가 application-level ACK를 보낼 때까지 삭제하지 않는다.** WS가 끊기거나 프로세스가 죽어도 미전송분은 DB에 남아 재연결 시 flush된다.
+
+   **메시지 포맷 (`PUBLISHER_REQUIRE_ACK=true` 활성 시)**:
+   ```jsonc
+   // listener → Adapter
+   {"type":"deposit","id":"<chainID>:<txHash>:<logIndex>","payload":{...Deposit JSON...}}
+
+   // Adapter → listener
+   {"type":"ack","id":"<chainID>:<txHash>:<logIndex>"}
+   ```
+   - listener는 ACK 수신 후에만 `BufferRepo.Ack()`로 DB row 삭제
+   - ACK timeout(`PUBLISHER_ACK_TIMEOUT_MS`, 기본 30s) 시 connection drop → 재연결 → 미Ack 항목 자동 재전송
+   - `PUBLISHER_MAX_IN_FLIGHT`(기본 100)로 flow control — Adapter 과부하 방지
+   - **호환성**: `PUBLISHER_REQUIRE_ACK=false` (기본)면 ACK 미사용, `WriteMessage` 성공 시 즉시 Ack (롤아웃 전 단계)
 
 4. **멱등성으로 중복 흡수**
    at-least-once는 중복 전송 가능성을 동반한다. `deposit_buffer`의 `UNIQUE(chain_id, tx_hash, log_index)`로 재스캔 중복 적재를 막고, 최종 중복 제거는 Adapter가 같은 키로 dedup한다. → 누락은 막되 중복도 막는다.

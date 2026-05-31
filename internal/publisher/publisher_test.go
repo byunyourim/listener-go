@@ -3,6 +3,7 @@ package publisher_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -75,18 +76,29 @@ func (f *fakeBuffer) acks() []ackKey {
 	return out
 }
 
-// wsTestServer Adapter 역할: 수신한 모든 메시지를 received 채널로 노출
+// wsTestServer Adapter 역할: 수신한 모든 메시지를 received 채널로 노출.
+// ackMode=true면 envelope를 파싱해 ACK 응답 자동 송신.
 type wsTestServer struct {
 	srv       *httptest.Server
 	received  chan string
 	upgrader  websocket.Upgrader
 	dialCount atomic.Int32
+	ackMode   bool
 }
 
 func newWSTestServer() *wsTestServer {
+	return newWSTestServerOpts(false)
+}
+
+func newACKTestServer() *wsTestServer {
+	return newWSTestServerOpts(true)
+}
+
+func newWSTestServerOpts(ackMode bool) *wsTestServer {
 	s := &wsTestServer{
 		received: make(chan string, 100),
 		upgrader: websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
+		ackMode:  ackMode,
 	}
 	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.dialCount.Add(1)
@@ -95,12 +107,28 @@ func newWSTestServer() *wsTestServer {
 			return
 		}
 		defer conn.Close()
+		var writeMu sync.Mutex
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
 				return
 			}
 			s.received <- string(msg)
+			if !s.ackMode {
+				continue
+			}
+			// envelope 파싱 → id 추출 → ACK 응답
+			var env struct {
+				Type string `json:"type"`
+				ID   string `json:"id"`
+			}
+			if err := json.Unmarshal(msg, &env); err != nil || env.Type != "deposit" {
+				continue
+			}
+			ack := []byte(`{"type":"ack","id":"` + env.ID + `"}`)
+			writeMu.Lock()
+			_ = conn.WriteMessage(websocket.TextMessage, ack)
+			writeMu.Unlock()
 		}
 	}))
 	return s
@@ -205,6 +233,139 @@ func TestPublisher_FlushNewlyAdded(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timeout waiting for newly added deposit")
 	}
+
+	cancel()
+	<-done
+}
+
+// ---------- ACK 모드 테스트 ----------
+
+func TestPublisher_ACKMode_FlushAndAck(t *testing.T) {
+	srv := newACKTestServer()
+	defer srv.close()
+
+	buf := &fakeBuffer{}
+	buf.add(sampleDeposit("0xaaa", 0), sampleDeposit("0xbbb", 1), sampleDeposit("0xccc", 2))
+
+	p := publisher.New(publisher.Config{
+		URL:                 srv.url(),
+		ReconnectIntervalMs: 100,
+		DrainTimeoutMs:      2000,
+		PollIntervalMs:      50,
+		MaxBatchSize:        10,
+		RequireACK:          true,
+		ACKTimeout:          5 * time.Second,
+		MaxInFlight:         10,
+	}, buf, quietLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = p.Run(ctx); close(done) }()
+
+	// 3건이 모두 도착하고 ACK 처리될 때까지 대기
+	require.Eventually(t, func() bool { return len(buf.acks()) == 3 }, 3*time.Second, 30*time.Millisecond,
+		"3건 모두 ACK 받고 DB에서 제거되어야 함")
+
+	cancel()
+	<-done
+
+	// 메시지 형식 검증 — envelope 포맷
+	require.Equal(t, 3, len(srv.received))
+	for i := 0; i < 3; i++ {
+		msg := <-srv.received
+		var env struct {
+			Type string          `json:"type"`
+			ID   string          `json:"id"`
+			Pay  json.RawMessage `json:"payload"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(msg), &env))
+		require.Equal(t, "deposit", env.Type)
+		require.NotEmpty(t, env.ID)
+		require.NotEmpty(t, env.Pay)
+	}
+}
+
+// 무시 Adapter (ACK 안 보냄) → ACK timeout 후 재연결
+func TestPublisher_ACKMode_TimeoutReconnect(t *testing.T) {
+	srv := newWSTestServer() // ackMode=false — ACK 안 보냄
+	defer srv.close()
+
+	buf := &fakeBuffer{}
+	buf.add(sampleDeposit("0xaaa", 0))
+
+	p := publisher.New(publisher.Config{
+		URL:                 srv.url(),
+		ReconnectIntervalMs: 100,
+		DrainTimeoutMs:      500,
+		PollIntervalMs:      50,
+		MaxBatchSize:        10,
+		RequireACK:          true,
+		ACKTimeout:          300 * time.Millisecond, // 짧게
+		MaxInFlight:         10,
+	}, buf, quietLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = p.Run(ctx); close(done) }()
+
+	// 첫 송신 받음
+	select {
+	case <-srv.received:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first message not received")
+	}
+
+	// ACK 안 와서 timeout → 재연결 (dialCount 증가)
+	require.Eventually(t, func() bool {
+		return srv.dialCount.Load() >= 2
+	}, 3*time.Second, 50*time.Millisecond, "ACK timeout으로 재연결 발생해야 함")
+
+	// ACK 받지 못했으므로 DB에서 안 지워짐
+	require.Empty(t, buf.acks(), "ACK 없으면 DB.Ack 호출되면 안 됨")
+
+	cancel()
+	<-done
+}
+
+// MaxInFlight 도달 시 추가 송신 제한 (flow control)
+func TestPublisher_ACKMode_FlowControl(t *testing.T) {
+	// ACK를 안 보내는 서버 → in-flight가 maxInFlight에서 멈춰야 함
+	srv := newWSTestServer()
+	defer srv.close()
+
+	buf := &fakeBuffer{}
+	// 충분히 많은 입금 추가
+	for i := 0; i < 20; i++ {
+		buf.add(sampleDeposit(fmt.Sprintf("0x%x", i), i))
+	}
+
+	maxInFlight := 5
+	p := publisher.New(publisher.Config{
+		URL:                 srv.url(),
+		ReconnectIntervalMs: 100,
+		DrainTimeoutMs:      300,
+		PollIntervalMs:      50,
+		MaxBatchSize:        100,
+		RequireACK:          true,
+		ACKTimeout:          30 * time.Second, // 충분히 길게
+		MaxInFlight:         maxInFlight,
+	}, buf, quietLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { _ = p.Run(ctx); close(done) }()
+
+	// 충분히 대기 — flow control 동작
+	time.Sleep(400 * time.Millisecond)
+
+	// 정확히 MaxInFlight 만큼만 송신됐어야 함 (그 이상 보내면 안 됨)
+	received := len(srv.received)
+	require.LessOrEqual(t, received, maxInFlight+1, "MaxInFlight 초과 송신 금지")
+	require.GreaterOrEqual(t, received, maxInFlight, "MaxInFlight까지는 보내야 함")
+	require.Empty(t, buf.acks(), "ACK 없으면 DB.Ack 호출되면 안 됨")
 
 	cancel()
 	<-done

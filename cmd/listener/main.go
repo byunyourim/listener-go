@@ -88,6 +88,9 @@ func run(ctx context.Context, log *slog.Logger) error {
 		DrainTimeoutMs:      cfg.DrainTimeoutMs,
 		PollIntervalMs:      bufferPollIntervalMs,
 		MaxBatchSize:        bufferMaxBatchSize,
+		RequireACK:          cfg.PublisherRequireACK,
+		ACKTimeout:          time.Duration(cfg.PublisherACKTimeoutMs) * time.Millisecond,
+		MaxInFlight:         cfg.PublisherMaxInFlight,
 	}, bufferRepo, log)
 
 	httpSrv := httpserver.New(httpserver.Config{
