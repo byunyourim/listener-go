@@ -33,7 +33,6 @@ internal/
   httpserver/             # /metrics, /healthz, /readyz, /debug/pprof
 migrations/               # Postgres 마이그레이션 (golang-migrate)
 docs/                     # 향후 도입 설계 문서
-testdata/                 # eERC 테스트 벡터 등 (Phase 2 진행 시)
 ```
 
 `internal/`을 쓰는 이유: Go는 `internal` 패키지를 같은 모듈 외부에서 import 못 하게 컴파일러가 강제한다. 외부에 노출할 라이브러리가 아니므로 캡슐화에 적합.
@@ -115,7 +114,7 @@ testdata/                 # eERC 테스트 벡터 등 (Phase 2 진행 시)
 
 | 영역 | 선택 | 비고 |
 |------|------|------|
-| 메트릭 | **prometheus/client_golang** | 24개+ 메트릭 노출 (scanner cursor/lag, buffer pending/age, publisher sent/errors/in_flight, supervisor panics/reconciles, audit mismatch, notify received, eERC decrypt 등) |
+| 메트릭 | **prometheus/client_golang** | 25개 메트릭 노출 (scanner cursor/lag, buffer pending/age, publisher sent/errors/in_flight, supervisor panics/reconciles, audit mismatch, notify received 등) |
 | 헬스체크 | net/http + 자체 핸들러 | `/healthz`(liveness), `/readyz`(첫 reconcile + DB ping) |
 | pprof | net/http/pprof | `/debug/pprof/` — 운영 중 라이브 프로파일링 |
 | 통합 테스트 | **testcontainers-go** | 임시 Postgres 컨테이너로 SQL 레벨 불변식 검증 (`make test-integration`) |
