@@ -21,6 +21,15 @@ import (
 // traceLogIndexBase 내부 네이티브 전송용 log_index 음수 공간 (LogScanner 네이티브와 분리)
 const traceLogIndexBase = -100_000
 
+// codeCacheMaxEntries codeCache 최대 항목 수 — OOM 방지.
+// 초과 시 캐시를 비우고 재구축 (eth_getCode 재호출 비용은 작음).
+// 10K × ~50B = ~500KB/scanner. 10체인 = ~5MB 상한.
+const codeCacheMaxEntries = 10_000
+
+// maxCallFrameDepth CallFrame 재귀 안전망.
+// 정상 EVM call depth는 1024 이하 — 그 이상은 비정상 RPC 응답.
+const maxCallFrameDepth = 1024
+
 // callFrame debug_traceTransaction(callTracer) 응답 구조
 type callFrame struct {
 	Type  string      `json:"type"`
@@ -116,13 +125,14 @@ func (s *TraceScanner) ScanBlock(ctx context.Context, blockNumber uint64, confir
 			return events, nil
 		}
 
-		s.collect(ctx, root.Calls, tx.Hash().Hex(), confirmations, blockTime, &frameCounter, &events)
+		s.collect(ctx, root.Calls, tx.Hash().Hex(), confirmations, blockTime, 0, &frameCounter, &events)
 	}
 
 	return events, nil
 }
 
-// isContract eth_getCode로 컨트랙트 여부 판별 (캐싱)
+// isContract eth_getCode로 컨트랙트 여부 판별 (캐싱).
+// 캐시가 maxEntries 도달 시 reset — 메모리 무한 증가 방지.
 func (s *TraceScanner) isContract(ctx context.Context, addr common.Address) (bool, error) {
 	if v, ok := s.codeCache[addr]; ok {
 		return v, nil
@@ -140,6 +150,10 @@ func (s *TraceScanner) isContract(ctx context.Context, addr common.Address) (boo
 		return false, err
 	}
 	v := len(code) > 0
+	if len(s.codeCache) >= codeCacheMaxEntries {
+		s.codeCache = make(map[common.Address]bool, codeCacheMaxEntries)
+		s.log.Info("codeCache reset (size limit reached)", "chain", s.chain.ChainID)
+	}
 	s.codeCache[addr] = v
 	return v, nil
 }
@@ -173,16 +187,23 @@ func (s *TraceScanner) traceTransaction(ctx context.Context, txHash common.Hash)
 	return &frame, nil
 }
 
-// collect CallFrame 트리를 DFS 순회하며 감시 주소로의 네이티브 전송 수집
+// collect CallFrame 트리를 DFS 순회하며 감시 주소로의 네이티브 전송 수집.
+// depth는 재귀 깊이 — maxCallFrameDepth 초과 시 안전망으로 중단(스택 보호).
 func (s *TraceScanner) collect(
 	ctx context.Context,
 	calls []callFrame,
 	txHash string,
 	confirmations int,
 	blockTime string,
+	depth int,
 	counter *int,
 	out *[]model.DepositEvent,
 ) {
+	if depth > maxCallFrameDepth {
+		s.log.Warn("trace call depth exceeded safety limit, truncating",
+			"tx", txHash, "depth", depth)
+		return
+	}
 	for _, call := range calls {
 		if call.Error != "" {
 			continue
@@ -212,7 +233,7 @@ func (s *TraceScanner) collect(
 		}
 
 		if len(call.Calls) > 0 {
-			s.collect(ctx, call.Calls, txHash, confirmations, blockTime, counter, out)
+			s.collect(ctx, call.Calls, txHash, confirmations, blockTime, depth+1, counter, out)
 		}
 	}
 }
