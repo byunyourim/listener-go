@@ -157,6 +157,7 @@ migrations/               # Postgres 마이그레이션 (golang-migrate)
 
 - [`docs/adapter-cross-check.md`](docs/adapter-cross-check.md) — Adapter cross-check API 도입 계획 (ACK 프로토콜 보완)
 - [`docs/rpc-multi-provider-quorum.md`](docs/rpc-multi-provider-quorum.md) — Multi-provider RPC quorum 설계 (RPC 누락 검출)
+- [`docs/eerc-integration.md`](docs/eerc-integration.md) — eERC20 통합 설계 (PrivateTransfer + Poseidon 복호화)
 
 ---
 
