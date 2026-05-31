@@ -26,6 +26,7 @@ import (
 	"github.com/byunyourim/listener-go/internal/metrics"
 	"github.com/byunyourim/listener-go/internal/publisher"
 	"github.com/byunyourim/listener-go/internal/scanner"
+	"github.com/byunyourim/listener-go/internal/scanner/decoder"
 	"github.com/byunyourim/listener-go/internal/supervisor"
 )
 
@@ -83,6 +84,11 @@ func run(ctx context.Context, log *slog.Logger) error {
 		BaseDelay:  time.Duration(cfg.RPCRetryBaseDelayMs) * time.Millisecond,
 	}
 
+	// 토큰 로그 디코더 — eERC 등 신규 표준 도입 시 여기서 Register
+	decoders := decoder.NewRegistry()
+	decoders.Register(decoder.NewStandardERC20())
+	// decoders.Register(decoder.NewEERC()) // spec 확정 후 활성화
+
 	pub := publisher.New(publisher.Config{
 		URL:                 cfg.WSTarget,
 		ReconnectIntervalMs: cfg.ReconnectIntervalMs,
@@ -106,7 +112,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 		onFirst:     httpSrv.MarkReady,
 	}
 
-	builder := newLoopBuilder(cfg, accountRepo, bufferRepo, kcpID, hasKcp, retryOpts, log)
+	builder := newLoopBuilder(cfg, accountRepo, bufferRepo, kcpID, hasKcp, retryOpts, decoders, log)
 	sup := supervisor.New(supSource, builder,
 		supervisor.Config{PollIntervalMs: cfg.ManagerPollIntervalMs}, log)
 
@@ -119,7 +125,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 
 	// 감사(audit) 잡 — 누락 검출
 	if cfg.AuditEnabled {
-		auditBuilder := newAuditBuilder(accountRepo, kcpID, hasKcp, retryOpts, log)
+		auditBuilder := newAuditBuilder(accountRepo, kcpID, hasKcp, retryOpts, decoders, log)
 		auditor := audit.New(configRepo, bufferRepo, auditBuilder, audit.Config{
 			IntervalSeconds: cfg.AuditIntervalS,
 			WindowBlocks:    uint64(cfg.AuditWindowBlocks),
@@ -188,6 +194,7 @@ func newAuditBuilder(
 	kcpChainID int64,
 	hasKcp bool,
 	retryOpts retry.Options,
+	decoders *decoder.Registry,
 	log *slog.Logger,
 ) audit.ScannerBuilder {
 	return func(ctx context.Context, chain *database.ChainConfig) (audit.Scanner, audit.Scanner, func(), error) {
@@ -197,7 +204,7 @@ func newAuditBuilder(
 		}
 		ethClient := ethclient.NewClient(rpcClient)
 
-		logScan := scanner.NewLogScanner(ethClient, accountRepo, chain, kcpChainID, hasKcp, retryOpts)
+		logScan := scanner.NewLogScanner(ethClient, accountRepo, chain, kcpChainID, hasKcp, retryOpts, decoders)
 		traceScan := scanner.NewTraceScanner(ethClient, rpcClient, accountRepo, chain, retryOpts, log)
 
 		cleanup := func() { rpcClient.Close() }
@@ -213,6 +220,7 @@ func newLoopBuilder(
 	kcpChainID int64,
 	hasKcp bool,
 	retryOpts retry.Options,
+	decoders *decoder.Registry,
 	log *slog.Logger,
 ) supervisor.LoopBuilder {
 	loopCfgFor := func(chain *database.ChainConfig) scanner.LoopConfig {
@@ -232,7 +240,7 @@ func newLoopBuilder(
 		}
 		ethClient := ethclient.NewClient(rpcClient)
 
-		logScan := scanner.NewLogScanner(ethClient, accountRepo, chain, kcpChainID, hasKcp, retryOpts)
+		logScan := scanner.NewLogScanner(ethClient, accountRepo, chain, kcpChainID, hasKcp, retryOpts, decoders)
 		traceScan := scanner.NewTraceScanner(ethClient, rpcClient, accountRepo, chain, retryOpts, log)
 
 		loopCfg := loopCfgFor(chain)

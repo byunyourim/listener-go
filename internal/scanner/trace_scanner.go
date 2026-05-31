@@ -158,7 +158,9 @@ func (s *TraceScanner) traceTransaction(ctx context.Context, txHash common.Hash)
 	if err != nil {
 		if isMethodNotFound(err) {
 			s.traceUnsupported = true
-			s.log.Warn("debug_traceTransaction not supported, disabling trace scanner")
+			// 내부 네이티브 전송 영구 감지 불가 — 알람 필수 (해당 RPC provider 교체 또는 archive 노드 필요)
+			s.log.Error("debug_traceTransaction not supported — trace scanner permanently disabled; internal native deposits will be missed",
+				"chain", s.chain.ChainID)
 			return nil, nil
 		}
 		return nil, err

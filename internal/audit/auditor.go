@@ -132,46 +132,60 @@ func (a *Auditor) runCycle(ctx context.Context) {
 	chains, err := a.source.ActiveChains(ctx)
 	if err != nil {
 		metrics.AuditErrors.WithLabelValues("db").Inc()
-		a.log.Error("ActiveChains failed", "err", err)
+		// audit이 한 사이클 통째로 실패 — 안전망 손실
+		a.log.Error("audit ActiveChains failed, cycle aborted", "err", err)
 		return
 	}
 	a.log.Debug("audit cycle starting", "chains", len(chains))
 
+	chainErrCount := 0
 	for _, ch := range chains {
 		if err := ctx.Err(); err != nil {
 			return
 		}
-		a.auditChain(ctx, ch.ChainID)
+		if !a.auditChain(ctx, ch.ChainID) {
+			chainErrCount++
+		}
 	}
 
 	a.lastCycleAt = time.Now()
 	metrics.AuditCycles.Inc()
 	metrics.AuditLastCycleAgeSeconds.Set(0)
+
+	if len(chains) > 0 && chainErrCount == len(chains) {
+		// 모든 체인이 실패 — audit이 사실상 동작 안 함
+		a.log.Error("audit cycle completed but all chains failed — audit ineffective",
+			"chains", len(chains))
+		return
+	}
 	a.log.Info("audit cycle complete",
 		"chains", len(chains),
+		"failed", chainErrCount,
 		"durationMs", time.Since(start).Milliseconds(),
 	)
 }
 
-func (a *Auditor) auditChain(ctx context.Context, chainID int64) {
+// auditChain 한 체인 감사. 성공이면 true.
+func (a *Auditor) auditChain(ctx context.Context, chainID int64) bool {
 	chain, err := a.source.ChainConfig(ctx, chainID)
 	if err != nil {
 		metrics.AuditErrors.WithLabelValues("db").Inc()
 		a.log.Warn("ChainConfig failed", "chain", chainID, "err", err)
-		return
+		return false
 	}
 
 	logScan, traceScan, cleanup, err := a.builder(ctx, chain)
 	if err != nil {
 		metrics.AuditErrors.WithLabelValues("builder").Inc()
 		a.log.Warn("audit builder failed", "chain", chainID, "err", err)
-		return
+		return false
 	}
 	defer cleanup()
 
 	// 두 스캐너 각각 감사 — cursor와 영역이 다를 수 있음
 	a.auditScanner(ctx, chainID, logScan)
 	a.auditScanner(ctx, chainID, traceScan)
+	return true
 }
 
 func (a *Auditor) auditScanner(ctx context.Context, chainID int64, sc Scanner) {

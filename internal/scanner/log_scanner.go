@@ -16,6 +16,7 @@ import (
 	"github.com/byunyourim/listener-go/internal/common/retry"
 	"github.com/byunyourim/listener-go/internal/database"
 	"github.com/byunyourim/listener-go/internal/model"
+	"github.com/byunyourim/listener-go/internal/scanner/decoder"
 )
 
 // log_index 인코딩: 네이티브 전송은 음수 공간으로 ERC-20 로그 인덱스(≥0)와 충돌 방지.
@@ -32,6 +33,7 @@ type LogScanner struct {
 	kcpChainID  int64
 	hasKcp      bool
 	retryOpt    retry.Options
+	decoders    *decoder.Registry // 토큰 로그 디코더 (ERC-20, 향후 eERC 등)
 }
 
 // NewLogScanner LogScanner 생성
@@ -42,6 +44,7 @@ func NewLogScanner(
 	kcpChainID int64,
 	hasKcp bool,
 	retryOpt retry.Options,
+	decoders *decoder.Registry,
 ) *LogScanner {
 	return &LogScanner{
 		client:      client,
@@ -50,6 +53,7 @@ func NewLogScanner(
 		kcpChainID:  kcpChainID,
 		hasKcp:      hasKcp,
 		retryOpt:    retryOpt,
+		decoders:    decoders,
 	}
 }
 
@@ -81,7 +85,7 @@ func (s *LogScanner) ScanBlock(ctx context.Context, blockNumber uint64, confirma
 	}
 
 	var tokens []model.DepositEvent
-	if len(s.chain.Contracts) > 0 {
+	if len(s.chain.Contracts) > 0 && s.decoders != nil && s.decoders.Len() > 0 {
 		tokens, err = s.parseTokenTransfers(ctx, blockNumber, confirmations, blockTime)
 		if err != nil {
 			return nil, fmt.Errorf("parse tokens: %w", err)
@@ -188,8 +192,8 @@ func (s *LogScanner) parseNativeTransfers(
 	return events, nil
 }
 
-// parseTokenTransfers eth_getLogs로 ERC-20 Transfer 로그 조회 후 입금 주소 매칭.
-// HasMany로 주소 prefetch (DB 쿼리 N → 1).
+// parseTokenTransfers Registry의 모든 디코더 토픽을 한 번에 쿼리, 토픽별 디스패치.
+// HasMany로 수신자 일괄 매칭 (DB 쿼리 N → 1).
 func (s *LogScanner) parseTokenTransfers(
 	ctx context.Context,
 	blockNumber uint64,
@@ -204,7 +208,7 @@ func (s *LogScanner) parseTokenTransfers(
 		FromBlock: new(big.Int).SetUint64(blockNumber),
 		ToBlock:   new(big.Int).SetUint64(blockNumber),
 		Addresses: addrs,
-		Topics:    [][]common.Hash{{transferTopic}},
+		Topics:    [][]common.Hash{s.decoders.Topics()}, // 등록된 모든 디코더 토픽
 	}
 
 	var logs []types.Log
@@ -219,33 +223,42 @@ func (s *LogScanner) parseTokenTransfers(
 		return nil, fmt.Errorf("FilterLogs: %w", err)
 	}
 
-	// 1단계: 로그 디코드 + 후보 수집
-	type tokenCandidate struct {
-		log    types.Log
-		info   database.ContractInfo
-		from   common.Address
-		to     common.Address
-		amount *big.Int
-	}
-	var candidates []tokenCandidate
+	// 1단계: 토픽별 디코더로 후보 수집
+	var candidates []model.DepositEvent
 	addrSet := make(map[string]struct{})
 	for _, lg := range logs {
 		info, ok := s.chain.Contracts[strings.ToLower(lg.Address.Hex())]
 		if !ok {
 			continue
 		}
-		from, to, amount, ok := parseTransfer(lg)
-		if !ok {
+		if len(lg.Topics) == 0 {
 			continue
 		}
-		candidates = append(candidates, tokenCandidate{log: lg, info: info, from: from, to: to, amount: amount})
-		addrSet[strings.ToLower(to.Hex())] = struct{}{}
+		dec := s.decoders.Lookup(lg.Topics[0])
+		if dec == nil {
+			continue
+		}
+		symbol := symbolForChain(info.Symbol, s.chain.ChainID, s.kcpChainID, s.hasKcp)
+		ev, err := dec.Decode(lg, info, decoder.Context{
+			ChainID:             s.chain.ChainID,
+			Confirmations:       confirmations,
+			TransactionDatetime: blockTime,
+			Symbol:              symbol,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("%s decode: %w", dec.Name(), err)
+		}
+		if ev == nil {
+			continue
+		}
+		candidates = append(candidates, *ev)
+		addrSet[strings.ToLower(ev.ToAddress)] = struct{}{}
 	}
 	if len(candidates) == 0 {
 		return nil, nil
 	}
 
-	// 2단계: 주소 일괄 매칭
+	// 2단계: 수신자 일괄 매칭
 	toList := make([]string, 0, len(addrSet))
 	for a := range addrSet {
 		toList = append(toList, a)
@@ -255,24 +268,13 @@ func (s *LogScanner) parseTokenTransfers(
 		return nil, fmt.Errorf("HasMany: %w", err)
 	}
 
-	// 3단계: 결과 → DepositEvent
+	// 3단계: 매칭된 것만 이벤트로
 	events := make([]model.DepositEvent, 0, len(candidates))
 	for _, c := range candidates {
-		if !matched[strings.ToLower(c.to.Hex())] {
+		if !matched[strings.ToLower(c.ToAddress)] {
 			continue
 		}
-		events = append(events, model.DepositEvent{
-			ChainID:             s.chain.ChainID,
-			TxHash:              c.log.TxHash.Hex(),
-			LogIndex:            int(c.log.Index),
-			FromAddress:         c.from.Hex(),
-			ToAddress:           c.to.Hex(),
-			Amount:              c.amount,
-			Symbol:              symbolForChain(c.info.Symbol, s.chain.ChainID, s.kcpChainID, s.hasKcp),
-			Decimals:            c.info.Decimals,
-			Confirmations:       confirmations,
-			TransactionDatetime: blockTime,
-		})
+		events = append(events, c)
 	}
 	return events, nil
 }

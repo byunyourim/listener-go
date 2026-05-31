@@ -222,6 +222,9 @@ func (p *Publisher) drainWithACK(ctx context.Context, conn *websocket.Conn) erro
 		case <-timeoutTicker.C:
 			if age := out.oldestAge(); age > p.cfg.ACKTimeout {
 				metrics.PublisherAckTimeouts.Inc()
+				// Adapter가 ACK를 안 보냄 — 누락 위험 정황, 즉시 알람
+				p.log.Error("ACK timeout — Adapter not responding, dropping connection to retry",
+					"oldestAge", age, "threshold", p.cfg.ACKTimeout, "inFlight", out.len())
 				return fmt.Errorf("ACK timeout exceeded: oldest %s > %s", age, p.cfg.ACKTimeout)
 			}
 		}
@@ -242,7 +245,9 @@ func (p *Publisher) gracefulACK(conn *websocket.Conn, out *outstanding, ackCh <-
 		}
 	}
 	if remaining := out.len(); remaining > 0 {
-		p.log.Warn("graceful shutdown deadline reached, ACKs missed (stays in DB)", "remaining", remaining)
+		// shutdown 중 미Ack 항목이 DB에 남음 — 재기동 시 재전송됨(누락 X). 운영 모니터링용.
+		p.log.Error("graceful shutdown deadline reached, ACKs missed (will retry on next start)",
+			"remaining", remaining)
 	}
 	return context.Canceled
 }

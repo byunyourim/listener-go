@@ -126,7 +126,8 @@ func (s *Supervisor) reconcile(ctx context.Context) error {
 		if ok {
 			select {
 			case <-existing.done:
-				s.log.Warn("chain runner died, will restart", "chain", chainID)
+				// 체인 goroutine이 예상 외로 종료됨 — 누락 위험 있는 정황이라 알람 필요
+				s.log.Error("chain runner died, will restart on next reconcile", "chain", chainID)
 				delete(s.running, chainID)
 				ok = false
 			default:
@@ -227,7 +228,9 @@ func (s *Supervisor) runLoop(
 	}()
 
 	if err := run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		log.Warn("loop exited with error", "err", err)
+		// 정상 cancel이 아닌 종료 — 짝 goroutine까지 정리되고 다음 reconcile에서 재기동.
+		// 누락 영향 가능성 있어 알람 필수.
+		log.Error("loop exited with error, will restart on next reconcile", "err", err)
 	}
 }
 
