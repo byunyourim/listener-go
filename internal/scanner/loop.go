@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/byunyourim/listener-go/internal/common/retry"
 	"github.com/byunyourim/listener-go/internal/database"
+	"github.com/byunyourim/listener-go/internal/metrics"
 	"github.com/byunyourim/listener-go/internal/model"
 )
 
@@ -90,8 +92,10 @@ func (l *Loop) pollOnce(ctx context.Context) error {
 		latest = v
 		return nil
 	}); err != nil {
+		metrics.ScannerErrors.WithLabelValues(l.chainLabel(), l.strategy.Name()).Inc()
 		return fmt.Errorf("BlockNumber: %w", err)
 	}
+	metrics.ScannerLatestBlock.WithLabelValues(l.chainLabel()).Set(float64(latest))
 
 	maxConfirmed := latest
 	if uint64(l.cfg.MinConfirmations) <= latest {
@@ -141,10 +145,18 @@ func (l *Loop) pollOnce(ctx context.Context) error {
 
 		// 비어 있어도 SaveAndAdvance를 호출해 커서를 전진시킴 (단일 tx)
 		if err := l.buffer.SaveAndAdvance(ctx, l.chainID, l.strategy.Name(), block, deposits); err != nil {
+			metrics.ScannerErrors.WithLabelValues(l.chainLabel(), l.strategy.Name()).Inc()
 			return fmt.Errorf("save block %d: %w", block, err)
 		}
 
+		// 메트릭 갱신
+		chainLabel := l.chainLabel()
+		scannerName := l.strategy.Name()
+		metrics.ScannerCursorBlock.WithLabelValues(chainLabel, scannerName).Set(float64(block))
+		metrics.ScannerLagBlocks.WithLabelValues(chainLabel, scannerName).Set(float64(latest - block))
+		metrics.ScannerBlocksProcessed.WithLabelValues(chainLabel, scannerName).Inc()
 		if len(deposits) > 0 {
+			metrics.ScannerDepositsFound.WithLabelValues(chainLabel, scannerName).Add(float64(len(deposits)))
 			l.log.Info("deposits buffered", "block", block, "count", len(deposits))
 		}
 
@@ -158,6 +170,11 @@ func (l *Loop) pollOnce(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// chainLabel prometheus 라벨용 chain_id 문자열
+func (l *Loop) chainLabel() string {
+	return strconv.FormatInt(l.chainID, 10)
 }
 
 // convertEvents DepositEvent → Deposit 변환, 실패 케이스는 로그만 남기고 skip

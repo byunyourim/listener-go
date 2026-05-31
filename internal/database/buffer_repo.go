@@ -129,6 +129,26 @@ func (s *BufferRepo) Ack(ctx context.Context, chainID int64, txHash string, logI
 	return nil
 }
 
+// Stats buffer 적체 상태 조회 (메트릭용)
+type Stats struct {
+	PendingCount     int64
+	OldestAgeSeconds float64 // pending 없으면 0
+}
+
+// Stats deposit_buffer의 적체 상태 — pending 수 + 가장 오래된 row age(초)
+func (s *BufferRepo) Stats(ctx context.Context) (Stats, error) {
+	var st Stats
+	err := s.pool.QueryRow(ctx, `
+		SELECT count(*),
+		       coalesce(EXTRACT(EPOCH FROM (now() - min(created_at))), 0)
+		  FROM deposit_buffer
+	`).Scan(&st.PendingCount, &st.OldestAgeSeconds)
+	if err != nil {
+		return Stats{}, fmt.Errorf("query buffer stats: %w", err)
+	}
+	return st, nil
+}
+
 // Cursor (chain_id, scanner)의 마지막 처리 블록. 미존재 시 0.
 func (s *BufferRepo) Cursor(ctx context.Context, chainID int64, scanner string) (uint64, error) {
 	var last int64

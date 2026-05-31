@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime/debug"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/byunyourim/listener-go/internal/database"
+	"github.com/byunyourim/listener-go/internal/metrics"
 )
 
 // LoopRunner 한 goroutine 진입점 — ctx 취소 시 정상 종료
@@ -82,7 +84,10 @@ func (s *Supervisor) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 			if err := s.reconcile(ctx); err != nil {
+				metrics.SupervisorReconciles.WithLabelValues("error").Inc()
 				s.log.Error("reconcile failed", "err", err)
+			} else {
+				metrics.SupervisorReconciles.WithLabelValues("success").Inc()
 			}
 		}
 	}
@@ -151,6 +156,8 @@ func (s *Supervisor) reconcile(ctx context.Context) error {
 		}
 	}
 
+	metrics.SupervisorChainsRunning.Set(float64(len(s.running)))
+
 	if len(started)+len(stopped)+len(reloaded) == 0 {
 		s.log.Debug("reconcile no changes", "active", len(active), "running", len(s.running))
 		return nil
@@ -211,6 +218,7 @@ func (s *Supervisor) runLoop(
 	log := s.log.With("chain", chainID, "scanner", name)
 	defer func() {
 		if r := recover(); r != nil {
+			metrics.SupervisorPanics.WithLabelValues(strconv.FormatInt(chainID, 10), name).Inc()
 			log.Error("PANIC recovered",
 				"recover", r,
 				"stack", string(debug.Stack()),

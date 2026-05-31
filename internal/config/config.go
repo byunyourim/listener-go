@@ -25,6 +25,9 @@ type Config struct {
 	DrainTimeoutMs        int `env:"DRAIN_TIMEOUT_MS"         envDefault:"5000"`
 	ManagerPollIntervalMs int `env:"MANAGER_POLL_INTERVAL_MS" envDefault:"300000"`
 
+	HTTPAddr             string `env:"HTTP_ADDR"               envDefault:":8080"`
+	BufferStatsIntervalS int    `env:"BUFFER_STATS_INTERVAL_S" envDefault:"15"`
+
 	LogLevel string `env:"LOG_LEVEL" envDefault:"warn"`
 }
 

@@ -21,16 +21,17 @@ import (
 	"github.com/byunyourim/listener-go/internal/common/shutdown"
 	"github.com/byunyourim/listener-go/internal/config"
 	"github.com/byunyourim/listener-go/internal/database"
+	"github.com/byunyourim/listener-go/internal/httpserver"
+	"github.com/byunyourim/listener-go/internal/metrics"
 	"github.com/byunyourim/listener-go/internal/publisher"
 	"github.com/byunyourim/listener-go/internal/scanner"
 	"github.com/byunyourim/listener-go/internal/supervisor"
 )
 
-// bufferPollIntervalMs publisher가 buffer 신규 항목을 폴링하는 주기 (LISTEN/NOTIFY 미도입)
-const bufferPollIntervalMs = 500
-
-// bufferMaxBatchSize 한 번 flush로 보낼 최대 건수
-const bufferMaxBatchSize = 100
+const (
+	bufferPollIntervalMs = 500 // publisher 폴링 (LISTEN/NOTIFY 미도입)
+	bufferMaxBatchSize   = 100
+)
 
 func main() {
 	log := logger.New("listener")
@@ -55,7 +56,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	log.Info("config loaded", "ws", cfg.WSTarget)
+	log.Info("config loaded", "ws", cfg.WSTarget, "httpAddr", cfg.HTTPAddr)
 
 	pool, err := database.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -89,14 +90,28 @@ func run(ctx context.Context, log *slog.Logger) error {
 		MaxBatchSize:        bufferMaxBatchSize,
 	}, bufferRepo, log)
 
+	httpSrv := httpserver.New(httpserver.Config{
+		Addr:            cfg.HTTPAddr,
+		ShutdownTimeout: 5 * time.Second,
+	}, pool, log)
+
+	// supervisor가 첫 reconcile 성공 시 httpSrv.MarkReady() 호출하도록 wrap
+	supSource := readyMarkingSource{
+		ChainSource: configRepo,
+		once:        &sync.Once{},
+		onFirst:     httpSrv.MarkReady,
+	}
+
 	builder := newLoopBuilder(cfg, accountRepo, bufferRepo, kcpID, hasKcp, retryOpts, log)
-	sup := supervisor.New(configRepo, builder,
+	sup := supervisor.New(supSource, builder,
 		supervisor.Config{PollIntervalMs: cfg.ManagerPollIntervalMs}, log)
 
-	// publisher와 supervisor 병렬 실행 — 하나가 종료되면 ctx 취소로 짝까지 정리
+	// 4개 goroutine을 errgroup으로 병렬 — 하나가 죽으면 ctx 취소로 전부 정리
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return pub.Run(gctx) })
 	g.Go(func() error { return sup.Run(gctx) })
+	g.Go(func() error { return httpSrv.Run(gctx) })
+	g.Go(func() error { return runBufferMonitor(gctx, bufferRepo, cfg.BufferStatsIntervalS, log) })
 
 	if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {
 		return err
@@ -104,8 +119,53 @@ func run(ctx context.Context, log *slog.Logger) error {
 	return nil
 }
 
-// newLoopBuilder Supervisor가 체인 기동 시 호출할 클로저.
-// 체인별 rpc 클라이언트와 scanner/Loop를 wiring하고, 두 runner가 모두 종료되면 rpc 클라이언트를 닫는다.
+// runBufferMonitor 주기적으로 deposit_buffer 적체 상태를 메트릭에 반영
+func runBufferMonitor(ctx context.Context, buffer *database.BufferRepo, intervalSec int, log *slog.Logger) error {
+	if intervalSec <= 0 {
+		intervalSec = 15
+	}
+	ticker := time.NewTicker(time.Duration(intervalSec) * time.Second)
+	defer ticker.Stop()
+
+	update := func() {
+		statsCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		st, err := buffer.Stats(statsCtx)
+		if err != nil {
+			log.Warn("buffer stats query failed", "err", err)
+			return
+		}
+		metrics.BufferPendingTotal.Set(float64(st.PendingCount))
+		metrics.BufferOldestAgeSeconds.Set(st.OldestAgeSeconds)
+	}
+	update() // 즉시 1회
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			update()
+		}
+	}
+}
+
+// readyMarkingSource 첫 ActiveChains 성공 호출 시 onFirst 콜백 1회 실행 (readiness 신호)
+type readyMarkingSource struct {
+	supervisor.ChainSource
+	once    *sync.Once
+	onFirst func()
+}
+
+func (r readyMarkingSource) ActiveChains(ctx context.Context) ([]database.ChainInfo, error) {
+	out, err := r.ChainSource.ActiveChains(ctx)
+	if err == nil {
+		r.once.Do(r.onFirst)
+	}
+	return out, err
+}
+
+// newLoopBuilder Supervisor가 체인 기동 시 호출할 클로저
 func newLoopBuilder(
 	cfg *config.Config,
 	accountRepo *database.AccountRepo,
@@ -139,7 +199,6 @@ func newLoopBuilder(
 		logLoop := scanner.NewLoop(chain.ChainID, ethClient, bufferRepo, logScan, loopCfg, log)
 		traceLoop := scanner.NewLoop(chain.ChainID, ethClient, bufferRepo, traceScan, loopCfg, log)
 
-		// 두 runner가 같은 rpc 클라이언트를 공유 — 둘 다 종료되면 1회만 close
 		closeOnce := sync.OnceFunc(func() { rpcClient.Close() })
 		active := atomic.Int32{}
 		active.Store(2)
