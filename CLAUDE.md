@@ -151,7 +151,7 @@ body (필수)
 |------|------|
 | type | 소문자. `feat` / `fix` / `docs` / `refactor` / `test` / `chore` 중 하나 |
 | scope | **사용 금지** (`feat(scanner):` 형식 X) |
-| subject | **한글 필수**, 대문자 시작 금지, header 전체 100자 이내 |
+| subject | **한글 필수**, 대문자 시작 금지(단, 고유명사·약어는 예외 — `README`, `DB`, `Go`, `Adapter` 등), header 전체 100자 이내 |
 | body | **필수** (무엇을·왜) |
 | references | **선택** — 관련 이슈가 있을 때만 `#이슈번호` 포함 (없으면 생략) |
 | 민감 파일 | `.env`, `credentials.*` 등 절대 커밋 금지 |
