@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/byunyourim/listener-go/internal/audit"
 	apperrors "github.com/byunyourim/listener-go/internal/common/errors"
 	"github.com/byunyourim/listener-go/internal/common/logger"
 	"github.com/byunyourim/listener-go/internal/common/retry"
@@ -109,12 +110,24 @@ func run(ctx context.Context, log *slog.Logger) error {
 	sup := supervisor.New(supSource, builder,
 		supervisor.Config{PollIntervalMs: cfg.ManagerPollIntervalMs}, log)
 
-	// 4개 goroutine을 errgroup으로 병렬 — 하나가 죽으면 ctx 취소로 전부 정리
+	// 메인 컴포넌트 병렬 실행 — 하나가 죽으면 ctx 취소로 전부 정리
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return pub.Run(gctx) })
 	g.Go(func() error { return sup.Run(gctx) })
 	g.Go(func() error { return httpSrv.Run(gctx) })
 	g.Go(func() error { return runBufferMonitor(gctx, bufferRepo, cfg.BufferStatsIntervalS, log) })
+
+	// 감사(audit) 잡 — 누락 검출
+	if cfg.AuditEnabled {
+		auditBuilder := newAuditBuilder(accountRepo, kcpID, hasKcp, retryOpts, log)
+		auditor := audit.New(configRepo, bufferRepo, auditBuilder, audit.Config{
+			IntervalSeconds: cfg.AuditIntervalS,
+			WindowBlocks:    uint64(cfg.AuditWindowBlocks),
+			SafetyMargin:    uint64(cfg.AuditSafetyMargin),
+			SamplesPerCycle: cfg.AuditSamplesPerCycle,
+		}, log)
+		g.Go(func() error { return auditor.Run(gctx) })
+	}
 
 	if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {
 		return err
@@ -166,6 +179,30 @@ func (r readyMarkingSource) ActiveChains(ctx context.Context) ([]database.ChainI
 		r.once.Do(r.onFirst)
 	}
 	return out, err
+}
+
+// newAuditBuilder 감사 잡이 호출할 빌더 — 정상 scanner와 RPC 클라이언트 공유 X.
+// 각 audit 사이클마다 fresh 연결을 만들어 cleanup으로 닫는다.
+func newAuditBuilder(
+	accountRepo *database.AccountRepo,
+	kcpChainID int64,
+	hasKcp bool,
+	retryOpts retry.Options,
+	log *slog.Logger,
+) audit.ScannerBuilder {
+	return func(ctx context.Context, chain *database.ChainConfig) (audit.Scanner, audit.Scanner, func(), error) {
+		rpcClient, err := rpc.DialContext(ctx, chain.RPCURL)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("dial audit RPC %s: %w", chain.RPCURL, err)
+		}
+		ethClient := ethclient.NewClient(rpcClient)
+
+		logScan := scanner.NewLogScanner(ethClient, accountRepo, chain, kcpChainID, hasKcp, retryOpts)
+		traceScan := scanner.NewTraceScanner(ethClient, rpcClient, accountRepo, chain, retryOpts, log)
+
+		cleanup := func() { rpcClient.Close() }
+		return logScan, traceScan, cleanup, nil
+	}
 }
 
 // newLoopBuilder Supervisor가 체인 기동 시 호출할 클로저

@@ -128,3 +128,36 @@ var (
 		Help: "Cumulative panics recovered per (chain_id, scanner).",
 	}, []string{"chain_id", "scanner"})
 )
+
+// Audit 감사(audit) 잡 지표 — 누락 검출 메커니즘
+var (
+	// AuditCycles 감사 사이클 누적.
+	AuditCycles = promauto.NewCounter(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: "audit", Name: "cycles_total",
+		Help: "Cumulative audit cycles completed.",
+	})
+
+	// AuditBlocksChecked 감사로 재스캔한 블록 수 누적.
+	AuditBlocksChecked = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: "audit", Name: "blocks_checked_total",
+		Help: "Cumulative blocks rescanned for audit per chain.",
+	}, []string{"chain_id"})
+
+	// AuditMismatchPendingMissing pending에 있지만 재스캔에서 못 찾은 건 — 🚨 즉시 알람.
+	AuditMismatchPendingMissing = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: "audit", Name: "mismatch_pending_missing_total",
+		Help: "Pending deposits not found in rescan (suspect: reorg/RPC drift/scanner bug).",
+	}, []string{"chain_id"})
+
+	// AuditErrors 감사 중 RPC/DB 에러 누적.
+	AuditErrors = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Subsystem: "audit", Name: "errors_total",
+		Help: "Cumulative errors during audit.",
+	}, []string{"phase"}) // rescan | db | builder
+
+	// AuditLastCycleAgeSeconds 마지막 사이클 완료 후 경과 시간 — 잡 정지 감지.
+	AuditLastCycleAgeSeconds = promauto.NewGauge(prometheus.GaugeOpts{
+		Namespace: namespace, Subsystem: "audit", Name: "last_cycle_age_seconds",
+		Help: "Seconds since the last completed audit cycle (0 if just done).",
+	})
+)

@@ -42,12 +42,13 @@ func (s *BufferRepo) SaveAndAdvance(
 		if err != nil {
 			return fmt.Errorf("marshal deposit: %w", err)
 		}
-		// UNIQUE(chain_id, tx_hash, log_index) — 재스캔 중복 적재 방지
+		// UNIQUE(chain_id, tx_hash, log_index) — 재스캔 중복 적재 방지.
+		// block_number는 감사(audit) 잡의 범위 쿼리용 — payload엔 없으니 별도 컬럼.
 		_, err = tx.Exec(ctx, `
-			INSERT INTO deposit_buffer (chain_id, tx_hash, log_index, payload)
-			VALUES ($1, $2, $3, $4)
+			INSERT INTO deposit_buffer (chain_id, tx_hash, log_index, payload, block_number)
+			VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT (chain_id, tx_hash, log_index) DO NOTHING
-		`, d.ChainID, d.TxHash, d.LogIndex, payload)
+		`, d.ChainID, d.TxHash, d.LogIndex, payload, int64(block))
 		if err != nil {
 			return fmt.Errorf("insert deposit_buffer: %w", err)
 		}
@@ -80,6 +81,22 @@ func (s *BufferRepo) Pending(ctx context.Context, chainID int64) ([]model.Deposi
 	`, chainID)
 	if err != nil {
 		return nil, fmt.Errorf("query pending: %w", err)
+	}
+	return scanDeposits(rows)
+}
+
+// PendingInRange chainID의 미전송 이벤트 중 block_number ∈ [fromBlock, toBlock] (감사용).
+// block_number가 NULL인 row(마이그레이션 전 적재분)는 제외.
+func (s *BufferRepo) PendingInRange(ctx context.Context, chainID int64, fromBlock, toBlock uint64) ([]model.Deposit, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT payload
+		  FROM deposit_buffer
+		 WHERE chain_id     = $1
+		   AND block_number BETWEEN $2 AND $3
+		 ORDER BY id ASC
+	`, chainID, int64(fromBlock), int64(toBlock))
+	if err != nil {
+		return nil, fmt.Errorf("query pending in range: %w", err)
 	}
 	return scanDeposits(rows)
 }

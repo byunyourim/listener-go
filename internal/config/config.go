@@ -34,6 +34,14 @@ type Config struct {
 	PublisherACKTimeoutMs int  `env:"PUBLISHER_ACK_TIMEOUT_MS" envDefault:"30000"`
 	PublisherMaxInFlight  int  `env:"PUBLISHER_MAX_IN_FLIGHT"  envDefault:"100"`
 
+	// 감사(audit) 잡 — 누락 검출용 독립 워커.
+	// 0이면 비활성 (Phase 1 호환).
+	AuditEnabled         bool `env:"AUDIT_ENABLED"            envDefault:"true"`
+	AuditIntervalS       int  `env:"AUDIT_INTERVAL_S"         envDefault:"3600"` // 1시간
+	AuditWindowBlocks    int  `env:"AUDIT_WINDOW_BLOCKS"      envDefault:"1000"`
+	AuditSafetyMargin    int  `env:"AUDIT_SAFETY_MARGIN"      envDefault:"50"`
+	AuditSamplesPerCycle int  `env:"AUDIT_SAMPLES_PER_CYCLE"  envDefault:"5"`
+
 	LogLevel string `env:"LOG_LEVEL" envDefault:"warn"`
 }
 
