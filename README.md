@@ -185,10 +185,12 @@ docs/                     # 향후 도입 설계 문서
 
 ### 추가 설계 문서
 
+- [`docs/architecture.md`](docs/architecture.md) — 구조 흐름 다이어그램 (프로세스 구조 / 입금 감지 시퀀스 / 분기 처리)
 - [`docs/adapter-cross-check.md`](docs/adapter-cross-check.md) — Adapter cross-check API 도입 계획 (ACK 프로토콜 보완)
 - [`docs/rpc-multi-provider-quorum.md`](docs/rpc-multi-provider-quorum.md) — Multi-provider RPC quorum 설계 (RPC 누락 검출)
 - [`docs/eerc-integration.md`](docs/eerc-integration.md) — eERC20 통합 설계 (PrivateTransfer + Poseidon 복호화)
 - [`docs/eerc-test-vectors-guide.md`](docs/eerc-test-vectors-guide.md) — eERC 복호화 테스트 벡터 확보 가이드 (Phase 2)
+- [`docs/ops-mcp.md`](docs/ops-mcp.md) — 운영 AI MCP 설계 (입금 누락 진단 보조, read-only)
 
 ---
 
